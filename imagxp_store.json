@@ -1,0 +1,14 @@
+{
+  "peers": [],
+  "chatMessages": [],
+  "friendRequests": [],
+  "nodeConfig": {
+    "domain": "ais-dev-wl4pcllowemn7yzv6vpfte-922836697041.asia-east1.run.app",
+    "username": "",
+    "signingPublicKey": "",
+    "exchangePublicKey": "",
+    "policy": "IMAGXP v1.0 / E2EE Enabled / Autonomous Agent Node / Cloudflare-Hono Ready",
+    "rateLimitPerMin": 120,
+    "updatedAt": 1790178585086
+  }
+}

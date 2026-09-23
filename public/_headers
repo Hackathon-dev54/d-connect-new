@@ -1,0 +1,17 @@
+# Cloudflare Pages Headers Configuration
+# Prevents edge caching of real-time protocol API and SSE streams
+# Prevents Cloudflare WAF / Managed Challenge from flagging API polling
+
+/api/*
+  Cache-Control: no-cache, no-store, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+  X-Accel-Buffering: no
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET, POST, OPTIONS
+  Access-Control-Allow-Headers: Content-Type, Authorization, x-client-id, x-imagxp-timestamp, x-imagxp-signature
+  Access-Control-Max-Age: 86400
+
+/.well-known/*
+  Cache-Control: public, max-age=60, s-maxage=60
+  Access-Control-Allow-Origin: *

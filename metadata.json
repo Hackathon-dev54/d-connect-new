@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Remix no call--IMAGXP Secure Messenger",
+  "description": "Decentralized end-to-end encrypted messaging powered by the IMAGXP protocol, domain-based agent discovery, ECDH key exchange, and MitM-proof verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
