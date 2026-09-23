@@ -187,7 +187,20 @@ export function createApp() {
         guideUrl: "https://neon.com/docs/guides/vercel-managed-integration",
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      console.error("api/db/status error:", err);
+      res.json({
+        configured: false,
+        engine: "Neon (Error)",
+        message: err.message || "Failed to query Neon PostgreSQL status",
+        detectedEnvKeys: [],
+        stats: { usersCount: 0, peersCount: 0, messagesCount: 0, channelsCount: 1 },
+        envVarsFound: {
+          DATABASE_URL: Boolean(process.env.DATABASE_URL),
+          POSTGRES_URL: Boolean(process.env.POSTGRES_URL),
+          POSTGRES_URL_NON_POOLING: Boolean(process.env.POSTGRES_URL_NON_POOLING),
+        },
+        guideUrl: "https://neon.com/docs/guides/vercel-managed-integration",
+      });
     }
   });
 
@@ -814,7 +827,19 @@ export function createApp() {
         serverTime: Date.now(),
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      console.error("Bootstrap error, falling back to in-memory store:", err);
+      res.json({
+        myDomain: cleanUser,
+        myUsername: nodeConfig.username,
+        myAvatarColor: nodeConfig.avatarColor,
+        customStatus: nodeConfig.customStatus,
+        channels: [{ id: "general", name: "general", description: "Global broadcast channel for all connected peers.", createdAt: 1700000000000, isDefault: true }],
+        messages: [],
+        peers: [],
+        databaseConfigured: neonDb.isConfigured(),
+        databaseError: err.message || "Failed to load database state",
+        serverTime: Date.now(),
+      });
     }
   });
 

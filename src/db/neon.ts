@@ -299,7 +299,6 @@ async function initTables(sql: any) {
           last_active BIGINT NOT NULL
         );
       `;
-
       await sql`
         CREATE TABLE IF NOT EXISTS channels (
           id TEXT PRIMARY KEY,
@@ -309,7 +308,6 @@ async function initTables(sql: any) {
           created_by TEXT
         );
       `;
-
       await sql`
         CREATE TABLE IF NOT EXISTS messages (
           id TEXT PRIMARY KEY,
@@ -325,7 +323,6 @@ async function initTables(sql: any) {
           timestamp BIGINT NOT NULL
         );
       `;
-
       await sql`
         CREATE TABLE IF NOT EXISTS peers (
           id TEXT PRIMARY KEY,
@@ -347,44 +344,16 @@ async function initTables(sql: any) {
         VALUES ('general', 'general', 'Global broadcast channel for all connected peers.', 1700000000000)
         ON CONFLICT (id) DO NOTHING;
       `;
-
-      // Sync existing memory/disk store to Neon PostgreSQL
-      for (const u of memoryStore.users.values()) {
-        try {
-          await sql`
-            INSERT INTO users (id, email, name, picture, domain, created_at, last_active)
-            VALUES (${u.id}, ${u.email}, ${u.name}, ${u.picture || null}, ${u.domain || null}, ${u.created_at}, ${u.last_active})
-            ON CONFLICT (id) DO NOTHING;
-          `;
-        } catch (_) {}
-      }
-
-      for (const p of memoryStore.peers.values()) {
-        try {
-          await sql`
-            INSERT INTO peers (id, owner_domain, peer_domain, username, avatar_color, inbox_url, status, direction, added_at, last_seen)
-            VALUES (${p.id}, ${p.owner_domain}, ${p.peer_domain}, ${p.username}, ${p.avatar_color}, ${p.inbox_url || null}, ${p.status}, ${p.direction}, ${p.added_at}, ${p.last_seen})
-            ON CONFLICT (id) DO NOTHING;
-          `;
-        } catch (_) {}
-      }
-
-      for (const m of memoryStore.messages) {
-        try {
-          await sql`
-            INSERT INTO messages (id, target_id, target_type, sender_id, sender_domain, sender_name, sender_color, text, image_url, reply_to, timestamp)
-            VALUES (${m.id}, ${m.target_id}, ${m.target_type}, ${m.sender_id}, ${m.sender_domain}, ${m.sender_name}, ${m.sender_color}, ${m.text || null}, ${m.image_url || null}, ${m.reply_to ? JSON.stringify(m.reply_to) : null}, ${m.timestamp})
-            ON CONFLICT (id) DO NOTHING;
-          `;
-        } catch (_) {}
-      }
     } catch (err) {
       console.error('Neon table initialization failed:', err);
+      // Reset so next request can retry if transient
+      tableInitPromise = null;
     }
   })();
 
   return tableInitPromise;
 }
+
 
 export const neonDb = {
   isConfigured(): boolean {

@@ -3,11 +3,11 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/index?__route__=$1"
+      "destination": "/api"
     },
     {
       "source": "/.well-known/(.*)",
-      "destination": "/api/index?__route__=.well-known/$1"
+      "destination": "/api"
     },
     {
       "source": "/((?!api/|\\.well-known/).*)",
@@ -15,3 +15,4 @@
     }
   ]
 }
+

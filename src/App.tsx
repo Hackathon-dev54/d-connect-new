@@ -259,6 +259,13 @@ export default function App() {
         const dbData = await dbRes.json();
         setNeonConfigured(Boolean(dbData.configured));
         setDbStatusInfo(dbData);
+      } else {
+        const text = await dbRes.text().catch(() => "");
+        setDbStatusInfo({
+          configured: false,
+          engine: `Server Error (${dbRes.status})`,
+          message: text.slice(0, 150) || `Server responded with status ${dbRes.status}. Please check Vercel function logs.`,
+        });
       }
 
       if (bootRes.ok) {
