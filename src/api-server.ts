@@ -1,4 +1,4 @@
-import { createApp } from "../src/app-server";
+import { createApp } from "./app-server";
 
 const app = createApp();
 
@@ -11,6 +11,7 @@ function resolveRequestUrl(req: any): string {
     url !== "/api" &&
     url !== "/api/" &&
     !url.startsWith("/api/index") &&
+    !url.startsWith("/api/[...path]") &&
     !url.startsWith("/api/[...all]")
   ) {
     return url;
@@ -32,8 +33,9 @@ function resolveRequestUrl(req: any): string {
     return matched + queryPart;
   }
 
+  // If Vercel catch-all route passed req.query.path
   if (req.query) {
-    const route = req.query.route || req.query.path || req.query.slug || req.query.__route__;
+    const route = req.query.path || req.query.route || req.query.slug || req.query.__route__ || req.query.all;
     if (route) {
       const sub = Array.isArray(route) ? route.join("/") : route;
       const queryIdx = url.indexOf("?");
@@ -73,7 +75,7 @@ export default function handler(req: any, res: any) {
     if (!res.headersSent) {
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: err.message || "Internal server error", failed: true }));
+      res.end(JSON.stringify({ error: err?.message || "Internal server error", failed: true }));
     }
   }
 }

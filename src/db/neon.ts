@@ -197,29 +197,38 @@ export function cleanPostgresUrl(val?: string | null): string | null {
   return null;
 }
 
+const ALL_DB_ENV_KEYS = [
+  'POSTGRES_URL',
+  'DATABASE_URL',
+  'POSTGRES_URL_NON_POOLING',
+  'DATABASE_URL_UNPOOLED',
+  'POSTGRES_PRISMA_URL',
+  'POSTGRES_URL_NO_SSL',
+  'POSTGRESQL_URL',
+  'NEON_DATABASE_URL',
+  'NEON_DB_URL',
+  'DB_URL',
+  'PGHOST',
+  'POSTGRES_HOST',
+];
+
 export function getDetectedDbEnvKeys(): string[] {
-  const keys = [
-    'DATABASE_URL',
-    'POSTGRES_URL',
-    'DATABASE_URL_UNPOOLED',
-    'POSTGRES_URL_NON_POOLING',
-    'POSTGRES_PRISMA_URL',
-    'POSTGRES_URL_NO_SSL',
-    'PGHOST',
-    'POSTGRES_HOST',
-  ];
-  return keys.filter((k) => Boolean(process.env[k] && process.env[k]?.trim()));
+  return ALL_DB_ENV_KEYS.filter((k) => Boolean(process.env[k] && process.env[k]?.trim()));
 }
 
 export function getDbUrl(): string | null {
   // Read ONLY from server environment variables (Vercel Neon integration)
   const envCandidates = [
-    process.env.DATABASE_URL,
     process.env.POSTGRES_URL,
-    process.env.DATABASE_URL_UNPOOLED,
+    process.env.DATABASE_URL,
     process.env.POSTGRES_URL_NON_POOLING,
+    process.env.DATABASE_URL_UNPOOLED,
     process.env.POSTGRES_PRISMA_URL,
     process.env.POSTGRES_URL_NO_SSL,
+    process.env.POSTGRESQL_URL,
+    process.env.NEON_DATABASE_URL,
+    process.env.NEON_DB_URL,
+    process.env.DB_URL,
   ];
 
   for (const candidate of envCandidates) {
@@ -327,7 +336,9 @@ export const neonDb = {
     engine: string;
     database?: string;
     message: string;
+    error?: string;
     detectedEnvKeys: string[];
+    checkedEnvKeys: string[];
     stats: {
       usersCount: number;
       peersCount: number;
@@ -337,15 +348,26 @@ export const neonDb = {
   }> {
     const detectedEnvKeys = getDetectedDbEnvKeys();
     const url = getDbUrl();
+    const isDeployed = Boolean(
+      process.env.VERCEL ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME ||
+      process.env.NODE_ENV === 'production'
+    );
+
     if (!url) {
       return {
         configured: false,
-        engine: 'Persistent Local Store (Disk & RAM)',
-        message:
-          detectedEnvKeys.length > 0
-            ? `Detected env keys (${detectedEnvKeys.join(', ')}), but connection string format was invalid or incomplete.`
-            : 'Running on persistent server storage. Connect a Neon PostgreSQL DATABASE_URL to enable cloud serverless sync.',
+        engine: isDeployed
+          ? 'Error: Database Environment Variable Missing'
+          : 'Local Memory Fallback (Dev Only)',
+        error: isDeployed
+          ? 'DATABASE_URL_NOT_FOUND'
+          : 'NO_DATABASE_URL_CONFIGURED',
+        message: isDeployed
+          ? `No PostgreSQL database URL detected in environment variables on Vercel. Checked candidate keys: ${ALL_DB_ENV_KEYS.join(', ')}. If you already added POSTGRES_URL or DATABASE_URL in Vercel Project Settings, you MUST TRIGGER A REDEPLOY in Vercel for serverless functions to load the new environment variables.`
+          : 'Running in local development without a database URL. Set POSTGRES_URL or DATABASE_URL in .env to connect Neon.',
         detectedEnvKeys,
+        checkedEnvKeys: ALL_DB_ENV_KEYS,
         stats: {
           usersCount: memoryStore.users.size,
           peersCount: memoryStore.peers.size,
@@ -378,10 +400,11 @@ export const neonDb = {
 
       return {
         configured: true,
-        engine: 'Neon Serverless PostgreSQL',
+        engine: 'Neon Serverless PostgreSQL (Live)',
         database: (res as any)[0]?.db,
-        message: 'Connected to Neon PostgreSQL database. All friend requests, messages, and accounts are persisted.',
+        message: `Connected successfully to Neon PostgreSQL database via ${detectedEnvKeys.join(', ')}. All friend requests, messages, and accounts are persisted.`,
         detectedEnvKeys,
+        checkedEnvKeys: ALL_DB_ENV_KEYS,
         stats: {
           usersCount,
           peersCount,
@@ -392,9 +415,11 @@ export const neonDb = {
     } catch (err: any) {
       return {
         configured: false,
-        engine: 'Neon (Connection Error)',
-        message: err.message,
+        engine: 'Neon PostgreSQL Connection Failed',
+        error: err?.message || 'Database connection error',
+        message: `Database URL was detected (${detectedEnvKeys.join(', ')}), but connection failed: ${err.message}. Please check your Neon project status, database password, and network access.`,
         detectedEnvKeys,
+        checkedEnvKeys: ALL_DB_ENV_KEYS,
         stats: {
           usersCount: memoryStore.users.size,
           peersCount: memoryStore.peers.size,
