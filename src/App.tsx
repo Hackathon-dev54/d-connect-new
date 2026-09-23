@@ -94,15 +94,17 @@ export function deriveDomainUsername(hostOrDomain: string): string {
 }
 
 function getApiHeaders(extra?: Record<string, string>): Record<string, string> {
-  const customNeon = typeof window !== 'undefined' ? localStorage.getItem('dconnect_neon_db_url') || '' : '';
-  const headers: Record<string, string> = { ...extra };
-  if (customNeon) {
-    headers['x-neon-db-url'] = customNeon;
-  }
-  return headers;
+  return { ...extra };
 }
 
 export default function App() {
+  // Clear any old client-cached DB URLs
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('dconnect_neon_db_url');
+    }
+  }, []);
+
   const currentHost = typeof window !== 'undefined' ? window.location.host : '';
 
   // Tab-isolated session user (allows 2 tabs to have different users or profiles)

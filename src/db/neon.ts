@@ -48,13 +48,11 @@ export interface PeerRecord {
 }
 
 function getWritableStorePath(filename: string): string {
-  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  // Always use /tmp in serverless or container environments
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NODE_ENV === 'production') {
     return path.join('/tmp', filename);
   }
   try {
-    const testFile = path.resolve(process.cwd(), '.write-test');
-    fs.writeFileSync(testFile, '1');
-    fs.unlinkSync(testFile);
     return path.resolve(process.cwd(), filename);
   } catch (_) {
     return path.join('/tmp', filename);
@@ -63,29 +61,7 @@ function getWritableStorePath(filename: string): string {
 
 const STORE_PATH = getWritableStorePath('dconnect_data_store.json');
 
-function loadDbUrlFromDisk(): string | null {
-  try {
-    const p = getWritableStorePath('dconnect_db_url.txt');
-    if (fs.existsSync(p)) {
-      const u = fs.readFileSync(p, 'utf-8').trim();
-      if (u.startsWith('postgres')) return u;
-    }
-  } catch (_) {}
-  return null;
-}
-
-function saveDbUrlToDisk(url: string | null): void {
-  try {
-    const p = getWritableStorePath('dconnect_db_url.txt');
-    if (url) {
-      fs.writeFileSync(p, url.trim(), 'utf-8');
-    } else if (fs.existsSync(p)) {
-      fs.unlinkSync(p);
-    }
-  } catch (_) {}
-}
-
-// Persistent Disk + Memory Cache for zero data loss across reloads or server restarts
+// Persistent Disk + Memory Cache for local dev and fallback
 class PersistentStore {
   users: Map<string, UserRecord> = new Map();
   channels: Map<string, ChannelRecord> = new Map();
@@ -204,11 +180,14 @@ class PersistentStore {
 
 const memoryStore = new PersistentStore();
 
-let customDbUrl: string | null = null;
-
 export function cleanPostgresUrl(val?: string | null): string | null {
   if (!val || typeof val !== 'string') return null;
-  let cleaned = val.trim().replace(/^['"]+/, '').replace(/['"]+$/, '').trim();
+  let cleaned = val.trim();
+  // Strip psql prefix or enclosing quotes if present
+  if (cleaned.startsWith('psql ')) {
+    cleaned = cleaned.slice(5).trim();
+  }
+  cleaned = cleaned.replace(/^['"]+/, '').replace(/['"]+$/, '').trim();
   if (cleaned.startsWith('postgres://') || cleaned.startsWith('postgresql://')) {
     if (cleaned.includes('neon.tech') && !cleaned.includes('sslmode=')) {
       cleaned += cleaned.includes('?') ? '&sslmode=require' : '?sslmode=require';
@@ -228,19 +207,12 @@ export function getDetectedDbEnvKeys(): string[] {
     'POSTGRES_URL_NO_SSL',
     'PGHOST',
     'POSTGRES_HOST',
-    'VITE_DATABASE_URL',
-    'VITE_POSTGRES_URL',
   ];
   return keys.filter((k) => Boolean(process.env[k] && process.env[k]?.trim()));
 }
 
-export function getDbUrl(reqDbUrl?: string | null): string | null {
-  const cleanedReq = cleanPostgresUrl(reqDbUrl);
-  if (cleanedReq) return cleanedReq;
-
-  const cleanedCustom = cleanPostgresUrl(customDbUrl);
-  if (cleanedCustom) return cleanedCustom;
-
+export function getDbUrl(): string | null {
+  // Read ONLY from server environment variables (Vercel Neon integration)
   const envCandidates = [
     process.env.DATABASE_URL,
     process.env.POSTGRES_URL,
@@ -248,8 +220,6 @@ export function getDbUrl(reqDbUrl?: string | null): string | null {
     process.env.POSTGRES_URL_NON_POOLING,
     process.env.POSTGRES_PRISMA_URL,
     process.env.POSTGRES_URL_NO_SSL,
-    process.env.VITE_DATABASE_URL,
-    process.env.VITE_POSTGRES_URL,
   ];
 
   for (const candidate of envCandidates) {
@@ -266,19 +236,7 @@ export function getDbUrl(reqDbUrl?: string | null): string | null {
     return `postgres://${encodeURIComponent(user.trim().replace(/^['"]+/, '').replace(/['"]+$/, ''))}:${encodeURIComponent(password.trim().replace(/^['"]+/, '').replace(/['"]+$/, ''))}@${host.trim()}/${database.trim()}?sslmode=require`;
   }
 
-  const diskUrl = loadDbUrlFromDisk();
-  if (diskUrl) {
-    const cleanedDisk = cleanPostgresUrl(diskUrl);
-    if (cleanedDisk) return cleanedDisk;
-  }
-
   return null;
-}
-
-export function setCustomDbUrl(url: string | null) {
-  customDbUrl = cleanPostgresUrl(url);
-  tableInitPromise = null;
-  saveDbUrlToDisk(customDbUrl);
 }
 
 let tableInitPromise: Promise<void> | null = null;
@@ -319,7 +277,7 @@ async function initTables(sql: any) {
           sender_color TEXT NOT NULL,
           text TEXT,
           image_url TEXT,
-          reply_to JSONB,
+          reply_to TEXT,
           timestamp BIGINT NOT NULL
         );
       `;
@@ -360,8 +318,8 @@ export const neonDb = {
     return Boolean(getDbUrl());
   },
 
-  setDbUrl(url: string | null) {
-    setCustomDbUrl(url);
+  setDbUrl(_url: string | null) {
+    // Database URL is managed exclusively via server-side environment variables
   },
 
   async getStatus(): Promise<{

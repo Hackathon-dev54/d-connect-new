@@ -137,21 +137,6 @@ export function createApp() {
     next();
   });
 
-  // Dynamic Neon DB configuration via request header, query, or body
-  app.use((req, _res, next) => {
-    const dbHeader =
-      (req.headers["x-neon-db-url"] as string) ||
-      (req.query.dbUrl as string) ||
-      (req.body && (req.body as any).neonDbUrl);
-    if (dbHeader && typeof dbHeader === "string") {
-      const cleaned = dbHeader.trim().replace(/^['"]+/, "").replace(/['"]+$/, "").trim();
-      if (cleaned.startsWith("postgres://") || cleaned.startsWith("postgresql://")) {
-        neonDb.setDbUrl(cleaned);
-      }
-    }
-    next();
-  });
-
   // Health and routing ping for /api and /api/index
   app.get(["/api", "/api/", "/api/index"], (_req, res) => {
     res.json({
@@ -1150,6 +1135,17 @@ export function createApp() {
       res.json({ success: true, syncedAt: Date.now() });
     } catch (err: any) {
       res.json({ success: false, error: err.message });
+    }
+  });
+
+  // Global catch-all error middleware for JSON responses (prevents HTML error pages)
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error("Express uncaught route error:", err);
+    if (!res.headersSent) {
+      res.status(200).json({
+        error: err?.message || "Internal server error",
+        failed: true,
+      });
     }
   });
 

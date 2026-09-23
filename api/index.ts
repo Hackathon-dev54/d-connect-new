@@ -8,6 +8,7 @@ function resolveRequestUrl(req: any): string {
   // If req.url is already a valid specific API route, keep it
   if (
     url.startsWith("/api/") &&
+    url !== "/api" &&
     url !== "/api/" &&
     !url.startsWith("/api/index") &&
     !url.startsWith("/api/[...all]")
@@ -16,14 +17,6 @@ function resolveRequestUrl(req: any): string {
   }
   if (url.startsWith("/.well-known/")) {
     return url;
-  }
-
-  // Check if req.query.all is present (from Vercel [...all].ts)
-  if (req.query && req.query.all) {
-    const sub = Array.isArray(req.query.all) ? req.query.all.join("/") : req.query.all;
-    const queryIdx = url.indexOf("?");
-    const queryPart = queryIdx !== -1 ? url.slice(queryIdx) : "";
-    return `/api/${sub}${queryPart}`;
   }
 
   // Check Vercel forward headers
@@ -39,6 +32,16 @@ function resolveRequestUrl(req: any): string {
     return matched + queryPart;
   }
 
+  if (req.query) {
+    const route = req.query.route || req.query.path || req.query.slug || req.query.__route__;
+    if (route) {
+      const sub = Array.isArray(route) ? route.join("/") : route;
+      const queryIdx = url.indexOf("?");
+      const queryPart = queryIdx !== -1 ? url.slice(queryIdx) : "";
+      return `/api/${sub.replace(/^\//, "")}${queryPart}`;
+    }
+  }
+
   return url;
 }
 
@@ -46,7 +49,7 @@ export default function handler(req: any, res: any) {
   // 1. Ensure CORS headers are present
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, x-neon-db-url");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept");
   res.setHeader("Access-Control-Max-Age", "86400");
 
   if (req.method === "OPTIONS") {
@@ -68,10 +71,9 @@ export default function handler(req: any, res: any) {
   } catch (err: any) {
     console.error("Vercel serverless uncaught error:", err);
     if (!res.headersSent) {
-      res.statusCode = 200; // Return 200 with error payload so client can display details instead of blank 500
+      res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: err.message || "Internal server error", failed: true }));
     }
   }
 }
-
