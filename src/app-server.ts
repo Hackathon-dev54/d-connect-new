@@ -124,16 +124,42 @@ export function createApp() {
 
   app.use(express.json({ limit: "15mb" }));
 
+  // Automatically normalize paths if Vercel serverless strips /api prefix
+  app.use((req, _res, next) => {
+    if (
+      req.url &&
+      !req.url.startsWith("/api") &&
+      !req.url.startsWith("/.well-known") &&
+      req.url !== "/favicon.ico"
+    ) {
+      req.url = "/api" + (req.url.startsWith("/") ? req.url : "/" + req.url);
+    }
+    next();
+  });
+
   // Dynamic Neon DB configuration via request header, query, or body
   app.use((req, _res, next) => {
     const dbHeader =
       (req.headers["x-neon-db-url"] as string) ||
       (req.query.dbUrl as string) ||
       (req.body && (req.body as any).neonDbUrl);
-    if (dbHeader && typeof dbHeader === "string" && dbHeader.trim().startsWith("postgres")) {
-      neonDb.setDbUrl(dbHeader.trim());
+    if (dbHeader && typeof dbHeader === "string") {
+      const cleaned = dbHeader.trim().replace(/^['"]+/, "").replace(/['"]+$/, "").trim();
+      if (cleaned.startsWith("postgres://") || cleaned.startsWith("postgresql://")) {
+        neonDb.setDbUrl(cleaned);
+      }
     }
     next();
+  });
+
+  // Health and routing ping for /api and /api/index
+  app.get(["/api", "/api/", "/api/index"], (_req, res) => {
+    res.json({
+      status: "ok",
+      service: "D-Connect Decentralized P2P Network",
+      database: neonDb.isConfigured() ? "Neon PostgreSQL Active" : "Persistent Local RAM/Disk",
+      time: Date.now(),
+    });
   });
 
   function getAppDomain(req: express.Request): string {

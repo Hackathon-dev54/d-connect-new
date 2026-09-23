@@ -20,19 +20,42 @@ export default function handler(req: any, res: any) {
     req._body = true;
   }
 
-  // 3. Restore original requested URL when Vercel rewrites to [...all]
-  const matchedPath =
-    (req.headers["x-matched-path"] as string) ||
-    (req.headers["x-vercel-matched-path"] as string) ||
-    (req.headers["x-invoke-path"] as string);
-
+  // 3. Accurately resolve requested endpoint without replacing with [...all]
+  let routeParam = req.query?.__route__ || req.query?.__path;
+  if (!routeParam && req.url && req.url.includes("?")) {
+    try {
+      const u = new URL(req.url, "http://localhost");
+      routeParam = u.searchParams.get("__route__") || u.searchParams.get("__path") || u.searchParams.get("path");
+    } catch (_) {}
+  }
   const queryString = req.url && req.url.includes("?") ? "?" + req.url.split("?")[1] : "";
 
-  if (matchedPath && matchedPath.startsWith("/api/")) {
-    req.url = matchedPath + queryString;
+  if (routeParam) {
+    const raw = Array.isArray(routeParam) ? routeParam.join("/") : routeParam;
+    const clean = raw.startsWith("/") ? raw : "/" + raw;
+    if (clean.startsWith("/.well-known/")) {
+      req.url = clean + queryString;
+    } else if (clean.startsWith("/api/")) {
+      req.url = clean + queryString;
+    } else {
+      req.url = "/api" + clean + queryString;
+    }
   } else if (req.query && req.query.all) {
     const sub = Array.isArray(req.query.all) ? req.query.all.join("/") : req.query.all;
     req.url = `/api/${sub}` + queryString;
+  } else if (
+    req.headers["x-forwarded-uri"] &&
+    (req.headers["x-forwarded-uri"].startsWith("/api/") ||
+      req.headers["x-forwarded-uri"].startsWith("/.well-known/"))
+  ) {
+    req.url = req.headers["x-forwarded-uri"];
+  } else if (req.url && (req.url === "/api" || req.url === "/api/" || req.url.includes("index") || req.url.includes("[...all]"))) {
+    const matchedPath =
+      (req.headers["x-matched-path"] as string) ||
+      (req.headers["x-invoke-path"] as string);
+    if (matchedPath && matchedPath.startsWith("/api/") && !matchedPath.includes("index") && !matchedPath.includes("[...all]")) {
+      req.url = matchedPath + queryString;
+    }
   }
 
   try {

@@ -136,6 +136,22 @@ export const NeonDbModal: React.FC<NeonDbModalProps> = ({ isOpen, onClose, onCon
             </div>
           )}
 
+          {dbStatus?.detectedEnvKeys && dbStatus.detectedEnvKeys.length > 0 && (
+            <div className="flex flex-col space-y-1 text-xs pt-1">
+              <span className="text-[#8e8e93] text-[11px] font-semibold">Detected Server Env Keys:</span>
+              <div className="flex flex-wrap gap-1">
+                {dbStatus.detectedEnvKeys.map((k: string) => (
+                  <span
+                    key={k}
+                    className="font-mono text-[10px] bg-emerald-950/60 text-emerald-400 border border-emerald-800/50 px-1.5 py-0.5 rounded"
+                  >
+                    ✓ {k}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="text-[11px] text-[#8e8e93] pt-1">
             {dbStatus?.message}
           </div>

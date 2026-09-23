@@ -221,6 +221,12 @@ export default function App() {
   const [showCapacitorModal, setShowCapacitorModal] = useState(false);
   const [showNeonModal, setShowNeonModal] = useState(false);
   const [neonConfigured, setNeonConfigured] = useState(false);
+  const [dbStatusInfo, setDbStatusInfo] = useState<{
+    configured: boolean;
+    engine?: string;
+    message?: string;
+    detectedEnvKeys?: string[];
+  } | null>(null);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -252,6 +258,7 @@ export default function App() {
       if (dbRes.ok) {
         const dbData = await dbRes.json();
         setNeonConfigured(Boolean(dbData.configured));
+        setDbStatusInfo(dbData);
       }
 
       if (bootRes.ok) {
@@ -1352,14 +1359,24 @@ export default function App() {
             <div className="flex items-center space-x-2">
               <Database className="h-4 w-4 text-amber-400 shrink-0" />
               <span>
-                <strong>Cross-Device Cloud Sync:</strong> Neon Database is not connected yet. Connect Neon DB to sync friends & messages across Mobile & PC!
+                <strong>Cross-Device Cloud Sync:</strong>{' '}
+                {dbStatusInfo?.detectedEnvKeys && dbStatusInfo.detectedEnvKeys.length > 0 ? (
+                  <span>
+                    Detected Vercel env (<strong>{dbStatusInfo.detectedEnvKeys.slice(0, 2).join(', ')}</strong>).{' '}
+                    {dbStatusInfo?.message && dbStatusInfo.message.includes('Error')
+                      ? dbStatusInfo.message
+                      : 'Connecting to database...'}
+                  </span>
+                ) : (
+                  'Neon Database is not connected yet. Connect Neon DB to sync friends & messages across Mobile & PC!'
+                )}
               </span>
             </div>
             <button
               onClick={() => setShowNeonModal(true)}
               className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-black font-bold text-[11px] rounded-lg transition shrink-0 cursor-pointer ml-2"
             >
-              Connect Neon DB
+              Configure Neon DB
             </button>
           </div>
         ) : (

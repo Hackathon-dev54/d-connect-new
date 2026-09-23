@@ -206,43 +206,77 @@ const memoryStore = new PersistentStore();
 
 let customDbUrl: string | null = null;
 
-export function getDbUrl(reqDbUrl?: string | null): string | null {
-  if (reqDbUrl && reqDbUrl.trim() && reqDbUrl.trim().startsWith('postgres')) {
-    return reqDbUrl.trim();
+export function cleanPostgresUrl(val?: string | null): string | null {
+  if (!val || typeof val !== 'string') return null;
+  let cleaned = val.trim().replace(/^['"]+/, '').replace(/['"]+$/, '').trim();
+  if (cleaned.startsWith('postgres://') || cleaned.startsWith('postgresql://')) {
+    if (cleaned.includes('neon.tech') && !cleaned.includes('sslmode=')) {
+      cleaned += cleaned.includes('?') ? '&sslmode=require' : '?sslmode=require';
+    }
+    return cleaned;
   }
-  if (customDbUrl) return customDbUrl;
+  return null;
+}
+
+export function getDetectedDbEnvKeys(): string[] {
+  const keys = [
+    'DATABASE_URL',
+    'POSTGRES_URL',
+    'DATABASE_URL_UNPOOLED',
+    'POSTGRES_URL_NON_POOLING',
+    'POSTGRES_PRISMA_URL',
+    'POSTGRES_URL_NO_SSL',
+    'PGHOST',
+    'POSTGRES_HOST',
+    'VITE_DATABASE_URL',
+    'VITE_POSTGRES_URL',
+  ];
+  return keys.filter((k) => Boolean(process.env[k] && process.env[k]?.trim()));
+}
+
+export function getDbUrl(reqDbUrl?: string | null): string | null {
+  const cleanedReq = cleanPostgresUrl(reqDbUrl);
+  if (cleanedReq) return cleanedReq;
+
+  const cleanedCustom = cleanPostgresUrl(customDbUrl);
+  if (cleanedCustom) return cleanedCustom;
 
   const envCandidates = [
     process.env.DATABASE_URL,
     process.env.POSTGRES_URL,
+    process.env.DATABASE_URL_UNPOOLED,
     process.env.POSTGRES_URL_NON_POOLING,
     process.env.POSTGRES_PRISMA_URL,
     process.env.POSTGRES_URL_NO_SSL,
+    process.env.VITE_DATABASE_URL,
+    process.env.VITE_POSTGRES_URL,
   ];
 
   for (const candidate of envCandidates) {
-    if (candidate && candidate.trim() && candidate.trim().startsWith('postgres')) {
-      return candidate.trim();
-    }
+    const cleaned = cleanPostgresUrl(candidate);
+    if (cleaned) return cleaned;
   }
 
-  if (
-    process.env.POSTGRES_HOST &&
-    process.env.POSTGRES_USER &&
-    process.env.POSTGRES_PASSWORD &&
-    process.env.POSTGRES_DATABASE
-  ) {
-    return `postgres://${encodeURIComponent(process.env.POSTGRES_USER)}:${encodeURIComponent(process.env.POSTGRES_PASSWORD)}@${process.env.POSTGRES_HOST}/${process.env.POSTGRES_DATABASE}?sslmode=require`;
+  const host = process.env.POSTGRES_HOST || process.env.PGHOST;
+  const user = process.env.POSTGRES_USER || process.env.PGUSER;
+  const password = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD;
+  const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE;
+
+  if (host && user && password && database) {
+    return `postgres://${encodeURIComponent(user.trim().replace(/^['"]+/, '').replace(/['"]+$/, ''))}:${encodeURIComponent(password.trim().replace(/^['"]+/, '').replace(/['"]+$/, ''))}@${host.trim()}/${database.trim()}?sslmode=require`;
   }
 
   const diskUrl = loadDbUrlFromDisk();
-  if (diskUrl) return diskUrl;
+  if (diskUrl) {
+    const cleanedDisk = cleanPostgresUrl(diskUrl);
+    if (cleanedDisk) return cleanedDisk;
+  }
 
   return null;
 }
 
 export function setCustomDbUrl(url: string | null) {
-  customDbUrl = url ? url.trim() : null;
+  customDbUrl = cleanPostgresUrl(url);
   tableInitPromise = null;
   saveDbUrlToDisk(customDbUrl);
 }
@@ -366,6 +400,7 @@ export const neonDb = {
     engine: string;
     database?: string;
     message: string;
+    detectedEnvKeys: string[];
     stats: {
       usersCount: number;
       peersCount: number;
@@ -373,13 +408,17 @@ export const neonDb = {
       channelsCount: number;
     };
   }> {
+    const detectedEnvKeys = getDetectedDbEnvKeys();
     const url = getDbUrl();
     if (!url) {
       return {
         configured: false,
         engine: 'Persistent Local Store (Disk & RAM)',
         message:
-          'Running on persistent server storage. Connect a Neon PostgreSQL DATABASE_URL to enable cloud serverless sync.',
+          detectedEnvKeys.length > 0
+            ? `Detected env keys (${detectedEnvKeys.join(', ')}), but connection string format was invalid or incomplete.`
+            : 'Running on persistent server storage. Connect a Neon PostgreSQL DATABASE_URL to enable cloud serverless sync.',
+        detectedEnvKeys,
         stats: {
           usersCount: memoryStore.users.size,
           peersCount: memoryStore.peers.size,
@@ -415,6 +454,7 @@ export const neonDb = {
         engine: 'Neon Serverless PostgreSQL',
         database: (res as any)[0]?.db,
         message: 'Connected to Neon PostgreSQL database. All friend requests, messages, and accounts are persisted.',
+        detectedEnvKeys,
         stats: {
           usersCount,
           peersCount,
@@ -427,6 +467,7 @@ export const neonDb = {
         configured: false,
         engine: 'Neon (Connection Error)',
         message: err.message,
+        detectedEnvKeys,
         stats: {
           usersCount: memoryStore.users.size,
           peersCount: memoryStore.peers.size,
