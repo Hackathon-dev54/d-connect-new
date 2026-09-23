@@ -5,22 +5,44 @@ const app = createApp();
 function resolveRequestUrl(req: any): string {
   let url = req.url || "/";
 
-  // If req.url is already a valid specific API route, keep it
-  if (
-    url.startsWith("/api/") &&
-    url !== "/api" &&
-    url !== "/api/" &&
-    !url.startsWith("/api/index") &&
-    !url.startsWith("/api/[...path]") &&
-    !url.startsWith("/api/[...all]")
-  ) {
-    return url;
-  }
-  if (url.startsWith("/.well-known/")) {
-    return url;
+  // 1. Direct check from URL query parameters (e.g. ?__route__=db/status)
+  if (url.includes("__route__=") || url.includes("route=") || url.includes("path=")) {
+    try {
+      const qIdx = url.indexOf("?");
+      if (qIdx !== -1) {
+        const params = new URLSearchParams(url.slice(qIdx + 1));
+        const routeParam = params.get("__route__") || params.get("route") || params.get("path");
+        if (routeParam) {
+          params.delete("__route__");
+          params.delete("route");
+          params.delete("path");
+          const qs = params.toString() ? `?${params.toString()}` : "";
+          const clean = routeParam.replace(/^\/+/, "");
+          if (clean.startsWith(".well-known/")) {
+            return `/${clean}${qs}`;
+          }
+          return `/api/${clean}${qs}`;
+        }
+      }
+    } catch (_) {
+      // Fallback
+    }
   }
 
-  // Check Vercel forward headers
+  // 2. If req.query was already populated
+  if (req.query) {
+    const route = req.query.__route__ || req.query.route || req.query.path || req.query.slug;
+    if (route) {
+      const sub = Array.isArray(route) ? route.join("/") : route;
+      const cleanSub = sub.replace(/^\/+/, "");
+      if (cleanSub.startsWith(".well-known/")) {
+        return `/${cleanSub}`;
+      }
+      return `/api/${cleanSub}`;
+    }
+  }
+
+  // 3. Check Vercel forward headers
   const fwd = req.headers["x-forwarded-url"] || req.headers["x-invoke-path"];
   if (fwd && typeof fwd === "string" && (fwd.startsWith("/api/") || fwd.startsWith("/.well-known/"))) {
     return fwd;
@@ -33,15 +55,17 @@ function resolveRequestUrl(req: any): string {
     return matched + queryPart;
   }
 
-  // If Vercel catch-all route passed req.query.path
-  if (req.query) {
-    const route = req.query.path || req.query.route || req.query.slug || req.query.__route__ || req.query.all;
-    if (route) {
-      const sub = Array.isArray(route) ? route.join("/") : route;
-      const queryIdx = url.indexOf("?");
-      const queryPart = queryIdx !== -1 ? url.slice(queryIdx) : "";
-      return `/api/${sub.replace(/^\//, "")}${queryPart}`;
-    }
+  // 4. If req.url is already a valid specific API route (not index)
+  if (
+    url.startsWith("/api/") &&
+    url !== "/api" &&
+    url !== "/api/" &&
+    !url.startsWith("/api/index")
+  ) {
+    return url;
+  }
+  if (url.startsWith("/.well-known/")) {
+    return url;
   }
 
   return url;

@@ -37,81 +37,32 @@ var PersistentStore = class {
         const raw = fs.readFileSync(STORE_PATH, "utf-8");
         const data = JSON.parse(raw);
         if (data.users && Array.isArray(data.users)) {
-          data.users.forEach((u) => {
-            this.users.set(u.id, u);
-            this.users.set(u.email.toLowerCase().trim(), u);
-          });
+          this.users = new Map(data.users.map((u) => [u.id, u]));
         }
         if (data.channels && Array.isArray(data.channels)) {
-          data.channels.forEach((c) => this.channels.set(c.id, c));
+          this.channels = new Map(data.channels.map((c) => [c.id, c]));
         }
         if (data.messages && Array.isArray(data.messages)) {
           this.messages = data.messages;
         }
         if (data.peers && Array.isArray(data.peers)) {
-          data.peers.forEach((p) => this.peers.set(p.id, p));
+          this.peers = new Map(data.peers.map((p) => [p.id, p]));
         }
       }
-    } catch (e) {
-      console.warn("Could not read disk store:", e);
+    } catch (_) {
     }
   }
   saveToDisk() {
     try {
       const data = {
-        users: Array.from(new Set(this.users.values())),
+        users: Array.from(this.users.values()),
         channels: Array.from(this.channels.values()),
-        messages: this.messages.slice(-2e3),
+        messages: this.messages.slice(-500),
         peers: Array.from(this.peers.values())
       };
       fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf-8");
-    } catch (e) {
-      console.warn("Could not write disk store:", e);
+    } catch (_) {
     }
-  }
-  addMessage(msg) {
-    if (!this.messages.some((m) => m.id === msg.id)) {
-      this.messages.push(msg);
-      this.saveToDisk();
-    }
-  }
-  upsertPeer(peer) {
-    this.peers.set(peer.id, peer);
-    this.saveToDisk();
-  }
-  updatePeerStatus(ownerDomain, peerDomain, status) {
-    const cleanOwner = ownerDomain.trim().toLowerCase();
-    const cleanPeer = peerDomain.trim().toLowerCase();
-    const id = `${cleanOwner}_${cleanPeer}`;
-    let updated = false;
-    for (const [key, p] of this.peers.entries()) {
-      if (key === id || p.owner_domain.trim().toLowerCase() === cleanOwner && p.peer_domain.trim().toLowerCase() === cleanPeer) {
-        p.status = status;
-        p.last_seen = Date.now();
-        this.peers.set(key, p);
-        updated = true;
-      }
-    }
-    if (updated) {
-      this.saveToDisk();
-    }
-  }
-  deletePeer(ownerDomain, peerDomain) {
-    const cleanOwner = ownerDomain.trim().toLowerCase();
-    const cleanPeer = peerDomain.trim().toLowerCase();
-    const id = `${cleanOwner}_${cleanPeer}`;
-    this.peers.delete(id);
-    for (const [key, p] of this.peers.entries()) {
-      if (p.owner_domain.trim().toLowerCase() === cleanOwner && p.peer_domain.trim().toLowerCase() === cleanPeer) {
-        this.peers.delete(key);
-      }
-    }
-    this.saveToDisk();
-  }
-  upsertUser(user) {
-    this.users.set(user.id, user);
-    this.users.set(user.email.toLowerCase().trim(), user);
-    this.saveToDisk();
   }
 };
 var memoryStore = new PersistentStore();
@@ -133,6 +84,9 @@ function cleanPostgresUrl(val) {
 var ALL_DB_ENV_KEYS = [
   "POSTGRES_URL",
   "DATABASE_URL",
+  "POSTGRES_HOST",
+  "PGPASSWORD",
+  "POSTGRES_DATABASE",
   "POSTGRES_URL_NON_POOLING",
   "DATABASE_URL_UNPOOLED",
   "POSTGRES_PRISMA_URL",
@@ -142,7 +96,8 @@ var ALL_DB_ENV_KEYS = [
   "NEON_DB_URL",
   "DB_URL",
   "PGHOST",
-  "POSTGRES_HOST"
+  "POSTGRES_USER",
+  "PGUSER"
 ];
 function getDetectedDbEnvKeys() {
   return ALL_DB_ENV_KEYS.filter((k) => Boolean(process.env[k] && process.env[k]?.trim()));
@@ -165,11 +120,15 @@ function getDbUrl() {
     if (cleaned) return cleaned;
   }
   const host = process.env.POSTGRES_HOST || process.env.PGHOST;
-  const user = process.env.POSTGRES_USER || process.env.PGUSER;
   const password = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD;
-  const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE;
-  if (host && user && password && database) {
-    return `postgres://${encodeURIComponent(user.trim().replace(/^['"]+/, "").replace(/['"]+$/, ""))}:${encodeURIComponent(password.trim().replace(/^['"]+/, "").replace(/['"]+$/, ""))}@${host.trim()}/${database.trim()}?sslmode=require`;
+  const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE || "neondb";
+  const user = process.env.POSTGRES_USER || process.env.PGUSER || "neondb_owner";
+  if (host && password) {
+    const cleanHost = host.trim().replace(/^['"]+/, "").replace(/['"]+$/, "");
+    const cleanUser = user.trim().replace(/^['"]+/, "").replace(/['"]+$/, "");
+    const cleanPass = password.trim().replace(/^['"]+/, "").replace(/['"]+$/, "");
+    const cleanDb = database.trim().replace(/^['"]+/, "").replace(/['"]+$/, "");
+    return `postgres://${encodeURIComponent(cleanUser)}:${encodeURIComponent(cleanPass)}@${cleanHost}/${cleanDb}?sslmode=require`;
   }
   return null;
 }
@@ -181,8 +140,8 @@ async function initTables(sql) {
       await sql`
         CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
-          email TEXT UNIQUE NOT NULL,
-          name TEXT,
+          email TEXT NOT NULL,
+          name TEXT NOT NULL,
           picture TEXT,
           domain TEXT,
           created_at BIGINT NOT NULL,
@@ -228,13 +187,14 @@ async function initTables(sql) {
         );
       `;
       await sql`
-        INSERT INTO channels (id, name, description, created_at)
-        VALUES ('general', 'general', 'Global broadcast channel for all connected peers.', 1700000000000)
+        INSERT INTO channels (id, name, description, created_at, created_by)
+        VALUES ('general', 'general', 'Global broadcast channel for all connected peers.', ${Date.now()}, 'system')
         ON CONFLICT (id) DO NOTHING;
       `;
     } catch (err) {
-      console.error("Neon table initialization failed:", err);
+      console.error("Neon table initialization error:", err);
       tableInitPromise = null;
+      throw err;
     }
   })();
   return tableInitPromise;
@@ -256,7 +216,7 @@ var neonDb = {
         configured: false,
         engine: isDeployed ? "Error: Database Environment Variable Missing" : "Local Memory Fallback (Dev Only)",
         error: isDeployed ? "DATABASE_URL_NOT_FOUND" : "NO_DATABASE_URL_CONFIGURED",
-        message: isDeployed ? `No PostgreSQL database URL detected in environment variables on Vercel. Checked candidate keys: ${ALL_DB_ENV_KEYS.join(", ")}. If you already added POSTGRES_URL or DATABASE_URL in Vercel Project Settings, you MUST TRIGGER A REDEPLOY in Vercel for serverless functions to load the new environment variables.` : "Running in local development without a database URL. Set POSTGRES_URL or DATABASE_URL in .env to connect Neon.",
+        message: isDeployed ? `No PostgreSQL database URL detected in environment variables on Vercel. Checked candidate keys: ${ALL_DB_ENV_KEYS.join(", ")}. If you already added POSTGRES_URL or DATABASE_URL in Vercel Project Settings, ensure it is assigned to both Production and Preview environments, then trigger a REDEPLOY in Vercel.` : "Running in local development without a database URL. Set POSTGRES_URL or DATABASE_URL in .env to connect Neon.",
         detectedEnvKeys,
         checkedEnvKeys: ALL_DB_ENV_KEYS,
         stats: {
@@ -325,13 +285,15 @@ var neonDb = {
     const updated = {
       id: user.id,
       email: user.email.toLowerCase().trim(),
-      name: user.name,
+      name: user.name || user.email.split("@")[0],
       picture: user.picture || existing?.picture,
       domain: user.domain || existing?.domain,
-      created_at: existing?.created_at || now,
+      created_at: existing ? existing.created_at : now,
       last_active: now
     };
-    memoryStore.upsertUser(updated);
+    memoryStore.users.set(user.id, updated);
+    memoryStore.users.set(updated.email, updated);
+    memoryStore.saveToDisk();
     if (url) {
       try {
         const sql = neon(url);
@@ -353,14 +315,16 @@ var neonDb = {
     return updated;
   },
   async getUser(idOrEmail) {
-    const clean = idOrEmail.toLowerCase().trim();
+    const clean = (idOrEmail || "").toLowerCase().trim();
     const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
-        const rows = await sql`SELECT * FROM users WHERE id = ${idOrEmail} OR LOWER(TRIM(email)) = ${clean} LIMIT 1;`;
-        if (rows.length > 0) {
+        const rows = await sql`
+          SELECT * FROM users WHERE id = ${idOrEmail} OR LOWER(email) = ${clean} LIMIT 1;
+        `;
+        if (rows && rows.length > 0) {
           const row = rows[0];
           return {
             id: row.id,
@@ -385,28 +349,20 @@ var neonDb = {
         const sql = neon(url);
         await initTables(sql);
         const rows = await sql`SELECT * FROM users ORDER BY last_active DESC LIMIT 100;`;
-        return rows.map((r) => ({
-          id: r.id,
-          email: r.email,
-          name: r.name,
-          picture: r.picture,
-          domain: r.domain,
-          created_at: Number(r.created_at),
-          last_active: Number(r.last_active)
+        return rows.map((row) => ({
+          id: row.id,
+          email: row.email,
+          name: row.name,
+          picture: row.picture,
+          domain: row.domain,
+          created_at: Number(row.created_at),
+          last_active: Number(row.last_active)
         }));
       } catch (err) {
         console.error("Neon getAllUsers error:", err);
       }
     }
-    const set = /* @__PURE__ */ new Set();
-    const list = [];
-    for (const u of memoryStore.users.values()) {
-      if (!set.has(u.id)) {
-        set.add(u.id);
-        list.push(u);
-      }
-    }
-    return list;
+    return Array.from(memoryStore.users.values()).sort((a, b) => b.last_active - a.last_active);
   },
   // CHANNELS
   async getChannels() {
@@ -416,13 +372,15 @@ var neonDb = {
         const sql = neon(url);
         await initTables(sql);
         const rows = await sql`SELECT * FROM channels ORDER BY created_at ASC;`;
-        return rows.map((r) => ({
-          id: r.id,
-          name: r.name,
-          description: r.description,
-          created_at: Number(r.created_at),
-          created_by: r.created_by
-        }));
+        if (rows.length > 0) {
+          return rows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            description: row.description || "",
+            created_at: Number(row.created_at),
+            created_by: row.created_by
+          }));
+        }
       } catch (err) {
         console.error("Neon getChannels error:", err);
       }
@@ -430,19 +388,18 @@ var neonDb = {
     return Array.from(memoryStore.channels.values());
   },
   async createChannel(channel) {
-    const url = getDbUrl();
     memoryStore.channels.set(channel.id, channel);
     memoryStore.saveToDisk();
+    const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
         await sql`
           INSERT INTO channels (id, name, description, created_at, created_by)
-          VALUES (${channel.id}, ${channel.name}, ${channel.description}, ${channel.created_at}, ${channel.created_by || null})
+          VALUES (${channel.id}, ${channel.name}, ${channel.description || ""}, ${channel.created_at}, ${channel.created_by || null})
           ON CONFLICT (id) DO NOTHING;
         `;
-        return channel;
       } catch (err) {
         console.error("Neon createChannel error:", err);
       }
@@ -450,228 +407,130 @@ var neonDb = {
     return channel;
   },
   // MESSAGES
-  async getMessages(targetId, userIdentifier) {
-    const cleanTarget = (targetId || "").trim().toLowerCase();
-    const cleanUser = (userIdentifier || "").trim().toLowerCase();
+  async insertMessage(message) {
+    memoryStore.messages.push(message);
+    if (memoryStore.messages.length > 500) {
+      memoryStore.messages = memoryStore.messages.slice(-500);
+    }
+    memoryStore.saveToDisk();
+    const url = getDbUrl();
+    if (url) {
+      try {
+        const sql = neon(url);
+        await initTables(sql);
+        const serializedReply = message.reply_to ? JSON.stringify(message.reply_to) : null;
+        await sql`
+          INSERT INTO messages (id, target_id, target_type, sender_id, sender_domain, sender_name, sender_color, text, image_url, reply_to, timestamp)
+          VALUES (
+            ${message.id},
+            ${message.target_id},
+            ${message.target_type},
+            ${message.sender_id},
+            ${message.sender_domain},
+            ${message.sender_name},
+            ${message.sender_color},
+            ${message.text || null},
+            ${message.image_url || null},
+            ${serializedReply},
+            ${message.timestamp}
+          )
+          ON CONFLICT (id) DO NOTHING;
+        `;
+      } catch (err) {
+        console.error("Neon insertMessage error:", err);
+      }
+    }
+    return message;
+  },
+  async getMessages(targetId, limit = 100) {
     const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
         let rows;
-        if (cleanTarget && cleanUser) {
+        if (targetId) {
           rows = await sql`
             SELECT * FROM messages 
-            WHERE (
-              (LOWER(TRIM(target_id)) = ${cleanTarget} AND (LOWER(TRIM(sender_id)) = ${cleanUser} OR LOWER(TRIM(sender_domain)) = ${cleanUser}))
-              OR
-              (LOWER(TRIM(target_id)) = ${cleanUser} AND (LOWER(TRIM(sender_id)) = ${cleanTarget} OR LOWER(TRIM(sender_domain)) = ${cleanTarget}))
-              OR
-              LOWER(TRIM(target_id)) = ${cleanTarget}
-            )
+            WHERE target_id = ${targetId} OR sender_domain = ${targetId} OR sender_id = ${targetId}
             ORDER BY timestamp ASC 
-            LIMIT 1000;
-          `;
-        } else if (cleanTarget) {
-          rows = await sql`
-            SELECT * FROM messages 
-            WHERE LOWER(TRIM(target_id)) = ${cleanTarget} 
-               OR LOWER(TRIM(sender_domain)) = ${cleanTarget} 
-               OR LOWER(TRIM(sender_id)) = ${cleanTarget}
-            ORDER BY timestamp ASC 
-            LIMIT 1000;
-          `;
-        } else if (cleanUser) {
-          rows = await sql`
-            SELECT * FROM messages 
-            WHERE target_type = 'channel' 
-               OR LOWER(TRIM(target_id)) = ${cleanUser} 
-               OR LOWER(TRIM(sender_id)) = ${cleanUser} 
-               OR LOWER(TRIM(sender_domain)) = ${cleanUser}
-            ORDER BY timestamp ASC 
-            LIMIT 1000;
+            LIMIT ${limit};
           `;
         } else {
           rows = await sql`
             SELECT * FROM messages 
             ORDER BY timestamp ASC 
-            LIMIT 1000;
+            LIMIT ${limit};
           `;
         }
-        return rows.map((r) => ({
-          id: r.id,
-          target_id: r.target_id,
-          target_type: r.target_type,
-          sender_id: r.sender_id,
-          sender_domain: r.sender_domain,
-          sender_name: r.sender_name,
-          sender_color: r.sender_color,
-          text: r.text,
-          image_url: r.image_url,
-          reply_to: r.reply_to,
-          timestamp: Number(r.timestamp)
+        return rows.map((row) => ({
+          id: row.id,
+          target_id: row.target_id,
+          target_type: row.target_type,
+          sender_id: row.sender_id,
+          sender_domain: row.sender_domain,
+          sender_name: row.sender_name,
+          sender_color: row.sender_color,
+          text: row.text || "",
+          image_url: row.image_url,
+          reply_to: row.reply_to ? typeof row.reply_to === "string" ? JSON.parse(row.reply_to) : row.reply_to : void 0,
+          timestamp: Number(row.timestamp)
         }));
       } catch (err) {
         console.error("Neon getMessages error:", err);
       }
     }
-    if (cleanTarget && cleanUser) {
+    if (targetId) {
       return memoryStore.messages.filter(
-        (m) => m.target_id.trim().toLowerCase() === cleanTarget && (m.sender_id.trim().toLowerCase() === cleanUser || m.sender_domain.trim().toLowerCase() === cleanUser) || m.target_id.trim().toLowerCase() === cleanUser && (m.sender_id.trim().toLowerCase() === cleanTarget || m.sender_domain.trim().toLowerCase() === cleanTarget) || m.target_id.trim().toLowerCase() === cleanTarget
-      );
-    } else if (cleanTarget) {
-      return memoryStore.messages.filter(
-        (m) => m.target_id.trim().toLowerCase() === cleanTarget || m.sender_domain.trim().toLowerCase() === cleanTarget || m.sender_id.trim().toLowerCase() === cleanTarget
-      );
-    } else if (cleanUser) {
-      return memoryStore.messages.filter(
-        (m) => m.target_type === "channel" || m.target_id.trim().toLowerCase() === cleanUser || m.sender_id.trim().toLowerCase() === cleanUser || m.sender_domain.trim().toLowerCase() === cleanUser
+        (m) => m.target_id === targetId || m.sender_domain === targetId || m.sender_id === targetId
       );
     }
-    return memoryStore.messages.slice(-1e3);
-  },
-  async insertMessage(msg) {
-    const cleanedMsg = {
-      ...msg,
-      target_id: msg.target_type === "channel" ? msg.target_id.trim().toLowerCase() : msg.target_id.trim().toLowerCase(),
-      sender_id: msg.sender_id.trim().toLowerCase(),
-      sender_domain: msg.sender_domain.trim().toLowerCase()
-    };
-    memoryStore.addMessage(cleanedMsg);
-    const url = getDbUrl();
-    if (url) {
-      try {
-        const sql = neon(url);
-        await initTables(sql);
-        await sql`
-          INSERT INTO messages (
-            id, target_id, target_type, sender_id, sender_domain, sender_name, sender_color, text, image_url, reply_to, timestamp
-          )
-          VALUES (
-            ${cleanedMsg.id}, ${cleanedMsg.target_id}, ${cleanedMsg.target_type}, ${cleanedMsg.sender_id}, ${cleanedMsg.sender_domain}, ${cleanedMsg.sender_name}, ${cleanedMsg.sender_color},
-            ${cleanedMsg.text || null}, ${cleanedMsg.image_url || null}, ${cleanedMsg.reply_to ? JSON.stringify(cleanedMsg.reply_to) : null}, ${cleanedMsg.timestamp}
-          )
-          ON CONFLICT (id) DO NOTHING;
-        `;
-        return cleanedMsg;
-      } catch (err) {
-        console.error("Neon insertMessage error:", err);
-      }
-    }
-    return cleanedMsg;
+    return memoryStore.messages.slice(-limit);
   },
   async clearMessages(targetId) {
-    const cleanTarget = targetId.trim().toLowerCase();
-    const url = getDbUrl();
-    memoryStore.messages = memoryStore.messages.filter(
-      (m) => m.target_id.trim().toLowerCase() !== cleanTarget && m.sender_domain.trim().toLowerCase() !== cleanTarget && m.sender_id.trim().toLowerCase() !== cleanTarget
-    );
+    if (targetId) {
+      memoryStore.messages = memoryStore.messages.filter((m) => m.target_id !== targetId);
+    } else {
+      memoryStore.messages = [];
+    }
     memoryStore.saveToDisk();
+    const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
-        await sql`
-          DELETE FROM messages 
-          WHERE LOWER(TRIM(target_id)) = ${cleanTarget} 
-             OR LOWER(TRIM(sender_domain)) = ${cleanTarget} 
-             OR LOWER(TRIM(sender_id)) = ${cleanTarget};
-        `;
+        if (targetId) {
+          await sql`DELETE FROM messages WHERE target_id = ${targetId};`;
+        } else {
+          await sql`DELETE FROM messages;`;
+        }
       } catch (err) {
         console.error("Neon clearMessages error:", err);
       }
     }
   },
-  // PEERS (Friend Requests & Connections)
-  async getPeers(ownerIdentifier) {
-    const cleanOwner = (ownerIdentifier || "").trim().toLowerCase();
-    const url = getDbUrl();
-    if (url) {
-      try {
-        const sql = neon(url);
-        await initTables(sql);
-        const rows = await sql`
-          SELECT * FROM peers 
-          WHERE LOWER(TRIM(owner_domain)) = ${cleanOwner} 
-             OR LOWER(TRIM(peer_domain)) = ${cleanOwner}
-          ORDER BY added_at DESC;
-        `;
-        const peerMap2 = /* @__PURE__ */ new Map();
-        for (const r of rows) {
-          const isOwner = (r.owner_domain || "").trim().toLowerCase() === cleanOwner;
-          const friendDomain = isOwner ? (r.peer_domain || "").trim().toLowerCase() : (r.owner_domain || "").trim().toLowerCase();
-          if (!friendDomain || friendDomain === cleanOwner) continue;
-          let direction = r.direction;
-          if (!isOwner) {
-            direction = r.direction === "outgoing" ? "incoming" : "outgoing";
-          }
-          const peerObj = {
-            id: `${cleanOwner}_${friendDomain}`,
-            owner_domain: cleanOwner,
-            peer_domain: friendDomain,
-            username: r.username || friendDomain.split("@")[0],
-            avatar_color: r.avatar_color || "purple",
-            inbox_url: r.inbox_url || `https://${friendDomain}/api/p2p/inbox`,
-            status: r.status,
-            direction,
-            added_at: Number(r.added_at),
-            last_seen: Number(r.last_seen)
-          };
-          const existing = peerMap2.get(friendDomain);
-          if (!existing || peerObj.status === "accepted" && existing.status !== "accepted") {
-            peerMap2.set(friendDomain, peerObj);
-          }
-        }
-        return Array.from(peerMap2.values());
-      } catch (err) {
-        console.error("Neon getPeers error:", err);
-      }
-    }
-    const peerMap = /* @__PURE__ */ new Map();
-    for (const p of memoryStore.peers.values()) {
-      const isOwner = p.owner_domain.trim().toLowerCase() === cleanOwner;
-      const isPeer = p.peer_domain.trim().toLowerCase() === cleanOwner;
-      if (!isOwner && !isPeer) continue;
-      const friendDomain = isOwner ? p.peer_domain.trim().toLowerCase() : p.owner_domain.trim().toLowerCase();
-      if (!friendDomain || friendDomain === cleanOwner) continue;
-      const direction = isOwner ? p.direction : p.direction === "outgoing" ? "incoming" : "outgoing";
-      const peerObj = {
-        id: `${cleanOwner}_${friendDomain}`,
-        owner_domain: cleanOwner,
-        peer_domain: friendDomain,
-        username: p.username || friendDomain.split("@")[0],
-        avatar_color: p.avatar_color || "purple",
-        inbox_url: p.inbox_url || `https://${friendDomain}/api/p2p/inbox`,
-        status: p.status,
-        direction,
-        added_at: Number(p.added_at),
-        last_seen: Number(p.last_seen)
-      };
-      const existing = peerMap.get(friendDomain);
-      if (!existing || peerObj.status === "accepted" && existing.status !== "accepted") {
-        peerMap.set(friendDomain, peerObj);
-      }
-    }
-    return Array.from(peerMap.values());
-  },
+  // PEERS
   async upsertPeer(peer) {
-    const cleanedPeer = {
-      ...peer,
-      owner_domain: peer.owner_domain.trim().toLowerCase(),
-      peer_domain: peer.peer_domain.trim().toLowerCase()
-    };
-    memoryStore.upsertPeer(cleanedPeer);
+    memoryStore.peers.set(peer.id, peer);
+    memoryStore.saveToDisk();
     const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
         await sql`
-          INSERT INTO peers (
-            id, owner_domain, peer_domain, username, avatar_color, inbox_url, status, direction, added_at, last_seen
-          )
+          INSERT INTO peers (id, owner_domain, peer_domain, username, avatar_color, inbox_url, status, direction, added_at, last_seen)
           VALUES (
-            ${cleanedPeer.id}, ${cleanedPeer.owner_domain}, ${cleanedPeer.peer_domain}, ${cleanedPeer.username}, ${cleanedPeer.avatar_color}, ${cleanedPeer.inbox_url || null}, ${cleanedPeer.status}, ${cleanedPeer.direction}, ${cleanedPeer.added_at}, ${cleanedPeer.last_seen}
+            ${peer.id},
+            ${peer.owner_domain},
+            ${peer.peer_domain},
+            ${peer.username},
+            ${peer.avatar_color},
+            ${peer.inbox_url || null},
+            ${peer.status},
+            ${peer.direction},
+            ${peer.added_at},
+            ${peer.last_seen}
           )
           ON CONFLICT (id) DO UPDATE SET
             username = EXCLUDED.username,
@@ -681,39 +540,45 @@ var neonDb = {
             direction = EXCLUDED.direction,
             last_seen = EXCLUDED.last_seen;
         `;
-        return cleanedPeer;
       } catch (err) {
         console.error("Neon upsertPeer error:", err);
       }
     }
-    return cleanedPeer;
+    return peer;
   },
-  async updatePeerStatus(ownerDomain, peerDomain, status) {
-    const cleanOwner = ownerDomain.trim().toLowerCase();
-    const cleanPeer = peerDomain.trim().toLowerCase();
-    const id = `${cleanOwner}_${cleanPeer}`;
-    memoryStore.updatePeerStatus(cleanOwner, cleanPeer, status);
+  async getPeers(ownerDomain) {
     const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
-        await sql`
-          UPDATE peers 
-          SET status = ${status}, last_seen = ${Date.now()}
-          WHERE id = ${id} 
-             OR (LOWER(TRIM(owner_domain)) = ${cleanOwner} AND LOWER(TRIM(peer_domain)) = ${cleanPeer});
+        const rows = await sql`
+          SELECT * FROM peers 
+          WHERE owner_domain = ${ownerDomain}
+          ORDER BY last_seen DESC;
         `;
+        return rows.map((row) => ({
+          id: row.id,
+          owner_domain: row.owner_domain,
+          peer_domain: row.peer_domain,
+          username: row.username,
+          avatar_color: row.avatar_color,
+          inbox_url: row.inbox_url,
+          status: row.status,
+          direction: row.direction,
+          added_at: Number(row.added_at),
+          last_seen: Number(row.last_seen)
+        }));
       } catch (err) {
-        console.error("Neon updatePeerStatus error:", err);
+        console.error("Neon getPeers error:", err);
       }
     }
+    return Array.from(memoryStore.peers.values()).filter((p) => p.owner_domain === ownerDomain);
   },
   async deletePeer(ownerDomain, peerDomain) {
-    const cleanOwner = ownerDomain.trim().toLowerCase();
-    const cleanPeer = peerDomain.trim().toLowerCase();
-    const id = `${cleanOwner}_${cleanPeer}`;
-    memoryStore.deletePeer(cleanOwner, cleanPeer);
+    const id = `${ownerDomain}_${peerDomain}`;
+    memoryStore.peers.delete(id);
+    memoryStore.saveToDisk();
     const url = getDbUrl();
     if (url) {
       try {
@@ -721,8 +586,7 @@ var neonDb = {
         await initTables(sql);
         await sql`
           DELETE FROM peers 
-          WHERE id = ${id} 
-             OR (LOWER(TRIM(owner_domain)) = ${cleanOwner} AND LOWER(TRIM(peer_domain)) = ${cleanPeer});
+          WHERE owner_domain = ${ownerDomain} AND peer_domain = ${peerDomain};
         `;
       } catch (err) {
         console.error("Neon deletePeer error:", err);
@@ -1660,11 +1524,37 @@ function createApp() {
 var app = createApp();
 function resolveRequestUrl(req) {
   let url = req.url || "/";
-  if (url.startsWith("/api/") && url !== "/api" && url !== "/api/" && !url.startsWith("/api/index") && !url.startsWith("/api/[...path]") && !url.startsWith("/api/[...all]")) {
-    return url;
+  if (url.includes("__route__=") || url.includes("route=") || url.includes("path=")) {
+    try {
+      const qIdx = url.indexOf("?");
+      if (qIdx !== -1) {
+        const params = new URLSearchParams(url.slice(qIdx + 1));
+        const routeParam = params.get("__route__") || params.get("route") || params.get("path");
+        if (routeParam) {
+          params.delete("__route__");
+          params.delete("route");
+          params.delete("path");
+          const qs = params.toString() ? `?${params.toString()}` : "";
+          const clean = routeParam.replace(/^\/+/, "");
+          if (clean.startsWith(".well-known/")) {
+            return `/${clean}${qs}`;
+          }
+          return `/api/${clean}${qs}`;
+        }
+      }
+    } catch (_) {
+    }
   }
-  if (url.startsWith("/.well-known/")) {
-    return url;
+  if (req.query) {
+    const route = req.query.__route__ || req.query.route || req.query.path || req.query.slug;
+    if (route) {
+      const sub = Array.isArray(route) ? route.join("/") : route;
+      const cleanSub = sub.replace(/^\/+/, "");
+      if (cleanSub.startsWith(".well-known/")) {
+        return `/${cleanSub}`;
+      }
+      return `/api/${cleanSub}`;
+    }
   }
   const fwd = req.headers["x-forwarded-url"] || req.headers["x-invoke-path"];
   if (fwd && typeof fwd === "string" && (fwd.startsWith("/api/") || fwd.startsWith("/.well-known/"))) {
@@ -1676,14 +1566,11 @@ function resolveRequestUrl(req) {
     const queryPart = queryIdx !== -1 ? url.slice(queryIdx) : "";
     return matched + queryPart;
   }
-  if (req.query) {
-    const route = req.query.path || req.query.route || req.query.slug || req.query.__route__ || req.query.all;
-    if (route) {
-      const sub = Array.isArray(route) ? route.join("/") : route;
-      const queryIdx = url.indexOf("?");
-      const queryPart = queryIdx !== -1 ? url.slice(queryIdx) : "";
-      return `/api/${sub.replace(/^\//, "")}${queryPart}`;
-    }
+  if (url.startsWith("/api/") && url !== "/api" && url !== "/api/" && !url.startsWith("/api/index")) {
+    return url;
+  }
+  if (url.startsWith("/.well-known/")) {
+    return url;
   }
   return url;
 }
