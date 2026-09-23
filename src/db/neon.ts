@@ -47,7 +47,43 @@ export interface PeerRecord {
   last_seen: number;
 }
 
-const STORE_PATH = path.resolve(process.cwd(), 'dconnect_data_store.json');
+function getWritableStorePath(filename: string): string {
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    return path.join('/tmp', filename);
+  }
+  try {
+    const testFile = path.resolve(process.cwd(), '.write-test');
+    fs.writeFileSync(testFile, '1');
+    fs.unlinkSync(testFile);
+    return path.resolve(process.cwd(), filename);
+  } catch (_) {
+    return path.join('/tmp', filename);
+  }
+}
+
+const STORE_PATH = getWritableStorePath('dconnect_data_store.json');
+
+function loadDbUrlFromDisk(): string | null {
+  try {
+    const p = getWritableStorePath('dconnect_db_url.txt');
+    if (fs.existsSync(p)) {
+      const u = fs.readFileSync(p, 'utf-8').trim();
+      if (u.startsWith('postgres')) return u;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function saveDbUrlToDisk(url: string | null): void {
+  try {
+    const p = getWritableStorePath('dconnect_db_url.txt');
+    if (url) {
+      fs.writeFileSync(p, url.trim(), 'utf-8');
+    } else if (fs.existsSync(p)) {
+      fs.unlinkSync(p);
+    }
+  } catch (_) {}
+}
 
 // Persistent Disk + Memory Cache for zero data loss across reloads or server restarts
 class PersistentStore {
@@ -170,19 +206,45 @@ const memoryStore = new PersistentStore();
 
 let customDbUrl: string | null = null;
 
-export function getDbUrl(): string | null {
-  return (
-    customDbUrl ||
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    process.env.POSTGRES_URL_NON_POOLING ||
-    null
-  );
+export function getDbUrl(reqDbUrl?: string | null): string | null {
+  if (reqDbUrl && reqDbUrl.trim() && reqDbUrl.trim().startsWith('postgres')) {
+    return reqDbUrl.trim();
+  }
+  if (customDbUrl) return customDbUrl;
+
+  const envCandidates = [
+    process.env.DATABASE_URL,
+    process.env.POSTGRES_URL,
+    process.env.POSTGRES_URL_NON_POOLING,
+    process.env.POSTGRES_PRISMA_URL,
+    process.env.POSTGRES_URL_NO_SSL,
+  ];
+
+  for (const candidate of envCandidates) {
+    if (candidate && candidate.trim() && candidate.trim().startsWith('postgres')) {
+      return candidate.trim();
+    }
+  }
+
+  if (
+    process.env.POSTGRES_HOST &&
+    process.env.POSTGRES_USER &&
+    process.env.POSTGRES_PASSWORD &&
+    process.env.POSTGRES_DATABASE
+  ) {
+    return `postgres://${encodeURIComponent(process.env.POSTGRES_USER)}:${encodeURIComponent(process.env.POSTGRES_PASSWORD)}@${process.env.POSTGRES_HOST}/${process.env.POSTGRES_DATABASE}?sslmode=require`;
+  }
+
+  const diskUrl = loadDbUrlFromDisk();
+  if (diskUrl) return diskUrl;
+
+  return null;
 }
 
 export function setCustomDbUrl(url: string | null) {
   customDbUrl = url ? url.trim() : null;
   tableInitPromise = null;
+  saveDbUrlToDisk(customDbUrl);
 }
 
 let tableInitPromise: Promise<void> | null = null;
@@ -701,29 +763,83 @@ export const neonDb = {
         const rows = await sql`
           SELECT * FROM peers 
           WHERE LOWER(TRIM(owner_domain)) = ${cleanOwner} 
-             OR owner_domain = ${ownerIdentifier}
+             OR LOWER(TRIM(peer_domain)) = ${cleanOwner}
           ORDER BY added_at DESC;
         `;
-        return rows.map((r: any) => ({
-          id: r.id,
-          owner_domain: r.owner_domain,
-          peer_domain: r.peer_domain,
-          username: r.username,
-          avatar_color: r.avatar_color,
-          inbox_url: r.inbox_url,
-          status: r.status,
-          direction: r.direction,
-          added_at: Number(r.added_at),
-          last_seen: Number(r.last_seen),
-        }));
+
+        const peerMap = new Map<string, PeerRecord>();
+
+        for (const r of rows) {
+          const isOwner = (r.owner_domain || '').trim().toLowerCase() === cleanOwner;
+          const friendDomain = isOwner
+            ? (r.peer_domain || '').trim().toLowerCase()
+            : (r.owner_domain || '').trim().toLowerCase();
+
+          if (!friendDomain || friendDomain === cleanOwner) continue;
+
+          let direction = r.direction;
+          if (!isOwner) {
+            direction = r.direction === 'outgoing' ? 'incoming' : 'outgoing';
+          }
+
+          const peerObj: PeerRecord = {
+            id: `${cleanOwner}_${friendDomain}`,
+            owner_domain: cleanOwner,
+            peer_domain: friendDomain,
+            username: r.username || friendDomain.split('@')[0],
+            avatar_color: r.avatar_color || 'purple',
+            inbox_url: r.inbox_url || `https://${friendDomain}/api/p2p/inbox`,
+            status: r.status,
+            direction: direction,
+            added_at: Number(r.added_at),
+            last_seen: Number(r.last_seen),
+          };
+
+          const existing = peerMap.get(friendDomain);
+          if (!existing || (peerObj.status === 'accepted' && existing.status !== 'accepted')) {
+            peerMap.set(friendDomain, peerObj);
+          }
+        }
+
+        return Array.from(peerMap.values());
       } catch (err) {
         console.error('Neon getPeers error:', err);
       }
     }
 
-    return Array.from(memoryStore.peers.values()).filter(
-      (p) => p.owner_domain.trim().toLowerCase() === cleanOwner
-    );
+    // Fallback to memoryStore
+    const peerMap = new Map<string, PeerRecord>();
+    for (const p of memoryStore.peers.values()) {
+      const isOwner = p.owner_domain.trim().toLowerCase() === cleanOwner;
+      const isPeer = p.peer_domain.trim().toLowerCase() === cleanOwner;
+      if (!isOwner && !isPeer) continue;
+
+      const friendDomain = isOwner
+        ? p.peer_domain.trim().toLowerCase()
+        : p.owner_domain.trim().toLowerCase();
+      if (!friendDomain || friendDomain === cleanOwner) continue;
+
+      const direction = isOwner ? p.direction : p.direction === 'outgoing' ? 'incoming' : 'outgoing';
+      const peerObj: PeerRecord = {
+        id: `${cleanOwner}_${friendDomain}`,
+        owner_domain: cleanOwner,
+        peer_domain: friendDomain,
+        username: p.username || friendDomain.split('@')[0],
+        avatar_color: p.avatar_color || 'purple',
+        inbox_url: p.inbox_url || `https://${friendDomain}/api/p2p/inbox`,
+        status: p.status,
+        direction: direction,
+        added_at: Number(p.added_at),
+        last_seen: Number(p.last_seen),
+      };
+
+      const existing = peerMap.get(friendDomain);
+      if (!existing || (peerObj.status === 'accepted' && existing.status !== 'accepted')) {
+        peerMap.set(friendDomain, peerObj);
+      }
+    }
+
+    return Array.from(peerMap.values());
   },
 
   async upsertPeer(peer: PeerRecord): Promise<PeerRecord> {

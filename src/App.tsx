@@ -93,6 +93,15 @@ export function deriveDomainUsername(hostOrDomain: string): string {
   return clean || 'node';
 }
 
+function getApiHeaders(extra?: Record<string, string>): Record<string, string> {
+  const customNeon = typeof window !== 'undefined' ? localStorage.getItem('dconnect_neon_db_url') || '' : '';
+  const headers: Record<string, string> = { ...extra };
+  if (customNeon) {
+    headers['x-neon-db-url'] = customNeon;
+  }
+  return headers;
+}
+
 export default function App() {
   const currentHost = typeof window !== 'undefined' ? window.location.host : '';
 
@@ -229,14 +238,15 @@ export default function App() {
     scrollToBottom();
   }, [messages, activeTarget, scrollToBottom]);
 
-  // Load Neon DB status and Bootstrap Data from server
+  // Load Neon DB status and Bootstrap Data from server with bidirectional sync
   const loadBootstrapDataForUser = useCallback(async (userIdentifier: string) => {
     const cleanId = cleanDomain(userIdentifier);
     if (!cleanId) return;
     try {
+      const apiHeaders = getApiHeaders();
       const [dbRes, bootRes] = await Promise.all([
-        fetch('/api/db/status'),
-        fetch(`/api/chat/bootstrap?userIdentifier=${encodeURIComponent(cleanId)}`),
+        fetch('/api/db/status', { headers: apiHeaders }),
+        fetch(`/api/chat/bootstrap?userIdentifier=${encodeURIComponent(cleanId)}`, { headers: apiHeaders }),
       ]);
 
       if (dbRes.ok) {
@@ -249,11 +259,63 @@ export default function App() {
         if (Array.isArray(data.channels) && data.channels.length > 0) {
           setChannels(data.channels);
         }
-        if (Array.isArray(data.messages)) {
-          setMessages(data.messages);
-        }
-        if (Array.isArray(data.peers)) {
-          setPeers(data.peers);
+
+        // 1. Merge Peers without dropping local peers
+        let currentPeersToSync: PeerIdentity[] = [];
+        setPeers((prev) => {
+          const map = new Map<string, PeerIdentity>();
+          // Existing local peers
+          for (const p of prev) {
+            const k = cleanDomain(p.domain);
+            if (k) map.set(k, p);
+          }
+          // Server peers (from Neon DB / other devices)
+          if (Array.isArray(data.peers)) {
+            for (const sp of data.peers) {
+              const k = cleanDomain(sp.domain);
+              if (!k) continue;
+              const existing = map.get(k);
+              if (!existing) {
+                map.set(k, sp);
+              } else if (sp.status === 'accepted' || (sp.lastSeen || 0) >= (existing.lastSeen || 0)) {
+                map.set(k, { ...existing, ...sp });
+              }
+            }
+          }
+          const merged = Array.from(map.values());
+          currentPeersToSync = merged;
+          return merged;
+        });
+
+        // 2. Merge Messages without dropping local messages
+        let currentMessagesToSync: ChatMessage[] = [];
+        setMessages((prev) => {
+          const msgMap = new Map<string, ChatMessage>();
+          for (const m of prev) {
+            if (m.id) msgMap.set(m.id, m);
+          }
+          if (Array.isArray(data.messages)) {
+            for (const sm of data.messages) {
+              if (sm.id) msgMap.set(sm.id, sm);
+            }
+          }
+          const merged = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+          currentMessagesToSync = merged;
+          return merged;
+        });
+
+        // 3. Bidirectional Sync: Upload local peers & messages to server
+        // so that if mobile had friends, the server & Neon DB receive them immediately for PC!
+        if (currentPeersToSync.length > 0 || currentMessagesToSync.length > 0) {
+          fetch('/api/chat/sync', {
+            method: 'POST',
+            headers: getApiHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+              userIdentifier: cleanId,
+              peers: currentPeersToSync,
+              messages: currentMessagesToSync,
+            }),
+          }).catch(() => {});
         }
       }
     } catch (err) {
@@ -597,7 +659,7 @@ export default function App() {
     try {
       const res = await fetch('/api/peer/send-request', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           senderDomain: senderClean,
           senderUsername: myUsername,
@@ -667,7 +729,7 @@ export default function App() {
     try {
       await fetch('/api/peer/respond-request', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           ownerDomain: effectiveIdentifier,
           peerDomain: targetClean,
@@ -703,7 +765,7 @@ export default function App() {
     try {
       await fetch(
         `/api/peer/${encodeURIComponent(targetClean)}?ownerDomain=${encodeURIComponent(effectiveIdentifier)}`,
-        { method: 'DELETE' }
+        { method: 'DELETE', headers: getApiHeaders() }
       );
     } catch (_) {}
 
@@ -754,7 +816,7 @@ export default function App() {
     try {
       await fetch('/api/chat/message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           targetId: activeTarget.id,
           targetType: activeTarget.type,
@@ -1283,6 +1345,41 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {/* Neon PostgreSQL Cloud Sync Status Banner */}
+        {!neonConfigured ? (
+          <div className="flex items-center justify-between px-4 py-2 bg-amber-950/40 border-b border-amber-800/40 text-xs text-amber-200">
+            <div className="flex items-center space-x-2">
+              <Database className="h-4 w-4 text-amber-400 shrink-0" />
+              <span>
+                <strong>Cross-Device Cloud Sync:</strong> Neon Database is not connected yet. Connect Neon DB to sync friends & messages across Mobile & PC!
+              </span>
+            </div>
+            <button
+              onClick={() => setShowNeonModal(true)}
+              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-black font-bold text-[11px] rounded-lg transition shrink-0 cursor-pointer ml-2"
+            >
+              Connect Neon DB
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between px-4 py-1.5 bg-emerald-950/30 border-b border-emerald-900/30 text-[11px] text-emerald-300">
+            <div className="flex items-center space-x-2">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>
+                <strong>Neon PostgreSQL Live:</strong> Cross-device sync is active. All friends and messages persist across mobile & PC.
+              </span>
+            </div>
+            <button
+              onClick={() => loadBootstrapData()}
+              className="flex items-center space-x-1 text-emerald-400 hover:text-white transition cursor-pointer"
+              title="Sync latest friends and messages"
+            >
+              <RefreshCw className="h-3 w-3" />
+              <span className="font-semibold">Sync</span>
+            </button>
+          </div>
+        )}
 
         {/* Message Feed */}
         <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-black">
@@ -1887,6 +1984,12 @@ export default function App() {
       <NeonDbModal
         isOpen={showNeonModal}
         onClose={() => setShowNeonModal(false)}
+        onConfigured={(configured) => {
+          setNeonConfigured(configured);
+          if (configured) {
+            loadBootstrapData();
+          }
+        }}
       />
     </div>
   );

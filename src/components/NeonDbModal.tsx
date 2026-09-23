@@ -4,21 +4,30 @@ import { Database, CheckCircle2, AlertCircle, ExternalLink, RefreshCw, X, Layers
 interface NeonDbModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onConfigured?: (configured: boolean) => void;
 }
 
-export const NeonDbModal: React.FC<NeonDbModalProps> = ({ isOpen, onClose }) => {
+export const NeonDbModal: React.FC<NeonDbModalProps> = ({ isOpen, onClose, onConfigured }) => {
   const [dbStatus, setDbStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [customUrlInput, setCustomUrlInput] = useState('');
+  const [customUrlInput, setCustomUrlInput] = useState(() => {
+    return localStorage.getItem('dconnect_neon_db_url') || '';
+  });
   const [isSavingUrl, setIsSavingUrl] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   const fetchStatus = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/db/status');
+      const savedUrl = localStorage.getItem('dconnect_neon_db_url') || '';
+      const res = await fetch('/api/db/status', {
+        headers: savedUrl ? { 'x-neon-db-url': savedUrl } : {},
+      });
       const data = await res.json();
       setDbStatus(data);
+      if (data.configured) {
+        onConfigured?.(true);
+      }
     } catch (e: any) {
       setDbStatus({ configured: false, message: e.message });
     } finally {
@@ -28,6 +37,8 @@ export const NeonDbModal: React.FC<NeonDbModalProps> = ({ isOpen, onClose }) => 
 
   useEffect(() => {
     if (isOpen) {
+      const saved = localStorage.getItem('dconnect_neon_db_url') || '';
+      if (saved) setCustomUrlInput(saved);
       fetchStatus();
     }
   }, [isOpen]);
@@ -38,14 +49,23 @@ export const NeonDbModal: React.FC<NeonDbModalProps> = ({ isOpen, onClose }) => 
 
     setIsSavingUrl(true);
     try {
+      const trimmed = customUrlInput.trim();
+      localStorage.setItem('dconnect_neon_db_url', trimmed);
+
       const res = await fetch('/api/db/configure', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ databaseUrl: customUrlInput.trim() }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-neon-db-url': trimmed,
+        },
+        body: JSON.stringify({ databaseUrl: trimmed }),
       });
       const data = await res.json();
       if (data.status) {
         setDbStatus(data.status);
+        if (data.status.configured) {
+          onConfigured?.(true);
+        }
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 2500);
       }

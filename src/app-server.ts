@@ -124,6 +124,18 @@ export function createApp() {
 
   app.use(express.json({ limit: "15mb" }));
 
+  // Dynamic Neon DB configuration via request header, query, or body
+  app.use((req, _res, next) => {
+    const dbHeader =
+      (req.headers["x-neon-db-url"] as string) ||
+      (req.query.dbUrl as string) ||
+      (req.body && (req.body as any).neonDbUrl);
+    if (dbHeader && typeof dbHeader === "string" && dbHeader.trim().startsWith("postgres")) {
+      neonDb.setDbUrl(dbHeader.trim());
+    }
+    next();
+  });
+
   function getAppDomain(req: express.Request): string {
     if (nodeConfig.domain && nodeConfig.domain.trim()) {
       return nodeConfig.domain;
@@ -810,6 +822,82 @@ export function createApp() {
       clearInterval(ping);
       sseClients.delete(client);
     });
+  });
+
+  // BIDIRECTIONAL SYNC (Sync client local cache up to Neon DB & Server)
+  // Ensures mobile data and PC data immediately merge without data loss
+  app.post("/api/chat/sync", async (req, res) => {
+    try {
+      const { userIdentifier, peers, messages } = req.body;
+      const cleanUser = cleanDomain(userIdentifier);
+      if (!cleanUser) {
+        return res.status(400).json({ error: "Missing userIdentifier" });
+      }
+
+      let savedPeers = 0;
+      let savedMessages = 0;
+
+      if (Array.isArray(peers) && peers.length > 0) {
+        for (const p of peers) {
+          const peerDomain = cleanDomain(p.domain);
+          if (!peerDomain || peerDomain === cleanUser) continue;
+
+          await neonDb.upsertPeer({
+            id: `${cleanUser}_${peerDomain}`,
+            owner_domain: cleanUser,
+            peer_domain: peerDomain,
+            username: p.username || peerDomain.split("@")[0].split(".")[0],
+            avatar_color: p.avatarColor || "purple",
+            inbox_url: p.inboxUrl || `https://${peerDomain}/api/p2p/inbox`,
+            status: p.status || "accepted",
+            direction: p.direction || "outgoing",
+            added_at: p.addedAt || Date.now(),
+            last_seen: p.lastSeen || Date.now(),
+          });
+
+          // If accepted, ensure the other side's peer record also exists in Neon DB
+          if (p.status === "accepted") {
+            await neonDb.upsertPeer({
+              id: `${peerDomain}_${cleanUser}`,
+              owner_domain: peerDomain,
+              peer_domain: cleanUser,
+              username: cleanUser.split("@")[0].split(".")[0],
+              avatar_color: "indigo",
+              inbox_url: `https://${cleanUser}/api/p2p/inbox`,
+              status: "accepted",
+              direction: "incoming",
+              added_at: p.addedAt || Date.now(),
+              last_seen: p.lastSeen || Date.now(),
+            });
+          }
+          savedPeers++;
+        }
+      }
+
+      if (Array.isArray(messages) && messages.length > 0) {
+        for (const m of messages) {
+          if (!m.id || (!m.text && !m.imageUrl)) continue;
+          await neonDb.insertMessage({
+            id: m.id,
+            target_id: m.targetId || "general",
+            target_type: m.targetType || "p2p",
+            sender_id: cleanDomain(m.senderId || cleanUser),
+            sender_domain: cleanDomain(m.senderDomain || cleanUser),
+            sender_name: m.senderName || cleanUser.split("@")[0].split(".")[0],
+            sender_color: m.senderColor || "indigo",
+            text: m.text || "",
+            image_url: m.imageUrl,
+            reply_to: m.replyTo,
+            timestamp: m.timestamp || Date.now(),
+          });
+          savedMessages++;
+        }
+      }
+
+      res.json({ success: true, savedPeers, savedMessages });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // 12. Send Message (Persisted directly to Neon DB)
