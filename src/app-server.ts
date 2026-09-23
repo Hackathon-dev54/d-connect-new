@@ -828,6 +828,7 @@ export function createApp() {
 
     const myDomain = senderId || getAppDomain(req);
     const cleanSenderDomain = cleanDomain(myDomain);
+    const cleanTargetId = targetType === "channel" ? targetId.trim().toLowerCase() : cleanDomain(targetId);
 
     if (!targetId || (!text.trim() && !imageUrl)) {
       return res.status(400).json({ error: "Missing required message fields" });
@@ -836,7 +837,7 @@ export function createApp() {
     const newMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const msgRecord: MessageRecord = {
       id: newMessageId,
-      target_id: targetId,
+      target_id: cleanTargetId,
       target_type: targetType,
       sender_id: cleanSenderDomain,
       sender_domain: cleanSenderDomain,
@@ -853,7 +854,7 @@ export function createApp() {
 
     const newMessage: ChatMessage = {
       id: msgRecord.id,
-      targetId,
+      targetId: cleanTargetId,
       targetType,
       senderId: cleanSenderDomain,
       senderDomain: cleanSenderDomain,

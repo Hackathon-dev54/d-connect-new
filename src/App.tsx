@@ -6,6 +6,7 @@ import {
 } from './types';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { GoogleAuthButton, GoogleUserProfile } from './components/GoogleAuthButton';
+import { OnboardingAuth } from './components/OnboardingAuth';
 import { NeonDbModal } from './components/NeonDbModal';
 import { p2pService, domainToPeerId } from './p2p/peer-service';
 import {
@@ -30,6 +31,7 @@ import {
   Database,
   Users,
   ShieldCheck,
+  LogOut,
 } from 'lucide-react';
 
 const AVATAR_COLORS: Record<string, { bg: string; text: string; ring: string }> = {
@@ -228,11 +230,13 @@ export default function App() {
   }, [messages, activeTarget, scrollToBottom]);
 
   // Load Neon DB status and Bootstrap Data from server
-  const loadBootstrapData = useCallback(async () => {
+  const loadBootstrapDataForUser = useCallback(async (userIdentifier: string) => {
+    const cleanId = cleanDomain(userIdentifier);
+    if (!cleanId) return;
     try {
       const [dbRes, bootRes] = await Promise.all([
         fetch('/api/db/status'),
-        fetch(`/api/chat/bootstrap?userIdentifier=${encodeURIComponent(effectiveIdentifier)}`),
+        fetch(`/api/chat/bootstrap?userIdentifier=${encodeURIComponent(cleanId)}`),
       ]);
 
       if (dbRes.ok) {
@@ -245,34 +249,31 @@ export default function App() {
         if (Array.isArray(data.channels) && data.channels.length > 0) {
           setChannels(data.channels);
         }
-        if (Array.isArray(data.messages) && data.messages.length > 0) {
-          setMessages((prev) => {
-            const map = new Map<string, ChatMessage>();
-            prev.forEach((m) => map.set(m.id, m));
-            data.messages.forEach((m: ChatMessage) => map.set(m.id, m));
-            return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
-          });
+        if (Array.isArray(data.messages)) {
+          setMessages(data.messages);
         }
-        if (Array.isArray(data.peers) && data.peers.length > 0) {
-          setPeers((prev) => {
-            const map = new Map<string, PeerIdentity>();
-            // Keep local un-synced if newer
-            prev.forEach((p) => map.set(cleanDomain(p.domain), p));
-            data.peers.forEach((p: PeerIdentity) => {
-              map.set(cleanDomain(p.domain), p);
-            });
-            return Array.from(map.values());
-          });
+        if (Array.isArray(data.peers)) {
+          setPeers(data.peers);
         }
       }
-    } catch (_) {}
-  }, [effectiveIdentifier]);
+    } catch (err) {
+      console.error('Error loading Neon bootstrap data:', err);
+    }
+  }, []);
+
+  const loadBootstrapData = useCallback(async () => {
+    await loadBootstrapDataForUser(effectiveIdentifier);
+  }, [effectiveIdentifier, loadBootstrapDataForUser]);
 
   useEffect(() => {
-    loadBootstrapData();
-  }, [loadBootstrapData]);
+    if (googleUser?.email) {
+      loadBootstrapDataForUser(googleUser.email);
+    } else {
+      loadBootstrapData();
+    }
+  }, [googleUser?.email, loadBootstrapData, loadBootstrapDataForUser]);
 
-  // Handle Google User authentication
+  // Handle User authentication
   const handleUserAuthenticated = (user: GoogleUserProfile) => {
     setGoogleUser(user);
     sessionStorage.setItem('dconnect_tab_user', JSON.stringify(user));
@@ -281,12 +282,19 @@ export default function App() {
       setMyUsername(user.name);
       localStorage.setItem(STORAGE_KEYS.USERNAME, user.name);
     }
+    const emailDomain = cleanDomain(user.email);
+    setMyDomain(emailDomain);
+    localStorage.setItem(STORAGE_KEYS.DOMAIN, emailDomain);
+    loadBootstrapDataForUser(emailDomain);
   };
 
   const handleSignOut = () => {
     setGoogleUser(null);
     sessionStorage.removeItem('dconnect_tab_user');
     localStorage.removeItem('dconnect_google_user');
+    setMessages([]);
+    setPeers([]);
+    setActiveTarget({ id: 'general', type: 'channel', name: 'general' });
   };
 
   // Fetch registered users for friend discovery
@@ -844,6 +852,20 @@ export default function App() {
   const outgoingRequests = peers.filter((p) => p.status === 'pending' && p.direction === 'outgoing');
   const acceptedPeers = peers.filter((p) => p.status === 'accepted');
 
+  // Mandatory Onboarding / Sign-In Gate: Ensure user is authenticated before chat
+  if (!googleUser) {
+    return (
+      <>
+        <OnboardingAuth
+          onAuthenticated={handleUserAuthenticated}
+          neonConfigured={neonConfigured}
+          onOpenNeonModal={() => setShowNeonModal(true)}
+        />
+        <NeonDbModal isOpen={showNeonModal} onClose={() => setShowNeonModal(false)} />
+      </>
+    );
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-black text-slate-100 font-sans select-none antialiased">
       {/* 1. SIDEBAR */}
@@ -1216,6 +1238,14 @@ export default function App() {
 
           {/* Quick Header Actions */}
           <div className="flex items-center space-x-2">
+            {/* User Account Info Chip */}
+            <div className="hidden lg:flex items-center space-x-2 px-2.5 py-1 rounded-xl bg-[#141417] border border-[#222226] text-xs">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="font-medium text-white truncate max-w-[150px]">
+                {googleUser?.email || effectiveIdentifier}
+              </span>
+            </div>
+
             <button
               onClick={() => setShowAddPeerModal(true)}
               className="hidden sm:flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-[#141417] border border-[#222226] text-indigo-400 font-semibold text-xs hover:bg-[#222226] transition cursor-pointer"
@@ -1240,6 +1270,16 @@ export default function App() {
               className="p-2 rounded-lg text-[#8e8e93] hover:text-rose-400 hover:bg-[#141417] transition cursor-pointer"
             >
               <Trash2 className="h-4 w-4" />
+            </button>
+
+            {/* Sign Out Button */}
+            <button
+              onClick={handleSignOut}
+              title="Sign out / Switch account"
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-[#141417] border border-[#222226] text-[#8e8e93] hover:text-rose-400 hover:border-rose-900/50 transition cursor-pointer text-xs"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline font-medium">Sign Out</span>
             </button>
           </div>
         </header>
