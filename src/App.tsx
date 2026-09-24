@@ -246,7 +246,26 @@ export default function App() {
     scrollToBottom();
   }, [messages, activeTarget, scrollToBottom]);
 
-  // Load Neon DB status and Bootstrap Data from server with bidirectional sync
+  // Equality comparator for peers to avoid redundant state updates and UI blinking
+  const arePeersEqual = (a: PeerIdentity[], b: PeerIdentity[]): boolean => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      const pA = a[i];
+      const pB = b.find((p) => cleanDomain(p.domain) === cleanDomain(pA.domain));
+      if (!pB) return false;
+      if (
+        pA.status !== pB.status ||
+        pA.username !== pB.username ||
+        pA.direction !== pB.direction ||
+        pA.avatarColor !== pB.avatarColor
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Load Neon DB status and Bootstrap Data from server
   const loadBootstrapDataForUser = useCallback(async (userIdentifier: string) => {
     const cleanId = cleanDomain(userIdentifier);
     if (!cleanId) return;
@@ -276,81 +295,54 @@ export default function App() {
           setChannels(data.channels);
         }
 
-        // 1. Merge Peers without dropping local peers or downgrading accepted status
-        let localPeers: PeerIdentity[] = [];
-        try {
-          const saved = localStorage.getItem(STORAGE_KEYS.PEERS);
-          if (saved) localPeers = JSON.parse(saved);
-        } catch (_) {}
-        if (!Array.isArray(localPeers) || localPeers.length === 0) {
-          localPeers = peersRef.current || [];
-        }
+        // 1. Authoritative server peers from Neon DB
+        const serverPeers: PeerIdentity[] = Array.isArray(data.peers)
+          ? data.peers.map((sp: any) => ({
+              domain: cleanDomain(sp.peer_domain || sp.domain),
+              username: sp.username || (sp.peer_domain || sp.domain).split('@')[0],
+              avatarColor: sp.avatar_color || sp.avatarColor || 'purple',
+              inboxUrl: sp.inbox_url || sp.inboxUrl || `https://${sp.peer_domain || sp.domain}/api/p2p/inbox`,
+              status: sp.status || 'pending',
+              direction: sp.direction || 'outgoing',
+              addedAt: Number(sp.added_at || sp.addedAt || Date.now()),
+              lastSeen: Number(sp.last_seen || sp.lastSeen || Date.now()),
+            }))
+          : [];
 
-        const peerMap = new Map<string, PeerIdentity>();
-        for (const p of localPeers) {
-          const k = cleanDomain(p.domain);
-          if (k) peerMap.set(k, p);
-        }
-
-        if (Array.isArray(data.peers)) {
-          for (const sp of data.peers) {
-            const k = cleanDomain(sp.domain);
-            if (!k) continue;
-            const existing = peerMap.get(k);
-            if (!existing) {
-              peerMap.set(k, sp);
-            } else {
-              const isAccepted = existing.status === 'accepted' || sp.status === 'accepted';
-              peerMap.set(k, {
-                ...existing,
-                ...sp,
-                status: isAccepted ? 'accepted' : sp.status,
-                lastSeen: Math.max(existing.lastSeen || 0, sp.lastSeen || 0),
-              });
-            }
+        // Avoid re-renders if peers have not changed
+        setPeers((prev) => {
+          if (arePeersEqual(prev, serverPeers)) {
+            return prev;
           }
-        }
-        const mergedPeers = Array.from(peerMap.values());
-        setPeers(mergedPeers);
-        try {
-          localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(mergedPeers));
-        } catch (_) {}
+          try {
+            localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(serverPeers));
+          } catch (_) {}
+          return serverPeers;
+        });
 
-        // 2. Merge Messages without dropping local messages
-        let localMessages: ChatMessage[] = [];
-        try {
-          const saved = localStorage.getItem(STORAGE_KEYS.MESSAGES);
-          if (saved) localMessages = JSON.parse(saved);
-        } catch (_) {}
-
-        const msgMap = new Map<string, ChatMessage>();
-        for (const m of localMessages) {
-          if (m.id) msgMap.set(m.id, m);
-        }
-        if (Array.isArray(data.messages)) {
-          for (const sm of data.messages) {
-            if (sm.id) msgMap.set(sm.id, sm);
+        // 2. Authoritative server messages
+        const serverMessages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : [];
+        setMessages((prev) => {
+          if (
+            prev.length === serverMessages.length &&
+            prev.length > 0 &&
+            prev[prev.length - 1]?.id === serverMessages[serverMessages.length - 1]?.id
+          ) {
+            return prev;
           }
-        }
-        const mergedMessages = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
-        setMessages(mergedMessages);
-        try {
-          localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(mergedMessages.slice(-1000)));
-        } catch (_) {}
-
-        // 3. Bidirectional Sync: Upload local peers & messages to server
-        // so that if mobile had friends, the server & Neon DB receive them immediately for PC!
-        if (mergedPeers.length > 0 || mergedMessages.length > 0) {
-          fetch('/api/chat/sync', {
-            method: 'POST',
-            headers: getApiHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({
-              userIdentifier: cleanId,
-              peers: mergedPeers,
-              messages: mergedMessages,
-            }),
-          }).catch(() => {});
-        }
+          const msgMap = new Map<string, ChatMessage>();
+          for (const m of serverMessages) {
+            if (m.id) msgMap.set(m.id, m);
+          }
+          for (const m of prev) {
+            if (m.id && !msgMap.has(m.id)) msgMap.set(m.id, m);
+          }
+          const merged = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+          try {
+            localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(merged.slice(-1000)));
+          } catch (_) {}
+          return merged;
+        });
       }
     } catch (err) {
       console.error('Error loading Neon bootstrap data:', err);
@@ -494,7 +486,25 @@ export default function App() {
           }
         } else if (type === 'peer_deleted') {
           const targetClean = cleanDomain(payload.domain);
-          setPeers((prev) => prev.filter((p) => cleanDomain(p.domain) !== targetClean));
+          setPeers((prev) => {
+            const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
+            try {
+              localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+            } catch (_) {}
+            return updated;
+          });
+          setMessages((prev) => {
+            const updated = prev.filter(
+              (m) =>
+                cleanDomain(m.targetId) !== targetClean &&
+                cleanDomain(m.senderDomain || '') !== targetClean &&
+                cleanDomain(m.senderId || '') !== targetClean
+            );
+            try {
+              localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(updated));
+            } catch (_) {}
+            return updated;
+          });
         } else if (type === 'message_new') {
           const msg = payload as ChatMessage;
           setMessages((prev) => {
@@ -624,12 +634,19 @@ export default function App() {
     };
   }, [effectiveIdentifier, myUsername, myAvatarColor]);
 
-  // Periodic heartbeat sync: syncs peers & messages from Neon DB every 4s
+  // Periodic background sync: syncs peers & messages from Neon DB every 15s or on window focus
   useEffect(() => {
+    const onFocus = () => {
+      loadBootstrapData();
+    };
+    window.addEventListener('focus', onFocus);
     const interval = setInterval(() => {
       loadBootstrapData();
-    }, 4000);
-    return () => clearInterval(interval);
+    }, 15000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      clearInterval(interval);
+    };
   }, [loadBootstrapData]);
 
   // Filter messages for current active target
@@ -728,7 +745,11 @@ export default function App() {
 
     setPeers((prev) => {
       const filtered = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
-      return [...filtered, newPeerObj];
+      const updated = [...filtered, newPeerObj];
+      try {
+        localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+      } catch (_) {}
+      return updated;
     });
 
     setPeerProbeStatus(`Request sent & saved to Neon DB! Waiting for approval.`);
@@ -748,16 +769,29 @@ export default function App() {
     const peer = peers.find((p) => cleanDomain(p.domain) === targetClean);
     if (!peer) return;
 
-    const newStatus = accept ? 'accepted' : 'rejected';
-    const updatedPeer: PeerIdentity = {
-      ...peer,
-      status: newStatus,
-      lastSeen: Date.now(),
-    };
-
-    setPeers((prev) =>
-      prev.map((p) => (cleanDomain(p.domain) === targetClean ? updatedPeer : p))
-    );
+    if (accept) {
+      const updatedPeer: PeerIdentity = {
+        ...peer,
+        status: 'accepted',
+        lastSeen: Date.now(),
+      };
+      setPeers((prev) => {
+        const updated = prev.map((p) => (cleanDomain(p.domain) === targetClean ? updatedPeer : p));
+        try {
+          localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+        } catch (_) {}
+        return updated;
+      });
+    } else {
+      // Declined: remove from peers list
+      setPeers((prev) => {
+        const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
+        try {
+          localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+        } catch (_) {}
+        return updated;
+      });
+    }
 
     // 1. Update Neon DB & broadcast SSE
     try {
@@ -787,14 +821,26 @@ export default function App() {
   // DELETE / CANCEL PEER
   const handleDeletePeer = async (peerDomain: string) => {
     const targetClean = cleanDomain(peerDomain);
-    setPeers((prev) => prev.filter((p) => cleanDomain(p.domain) !== targetClean));
-    setMessages((prev) =>
-      prev.filter(
+    setPeers((prev) => {
+      const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
+      try {
+        localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+      } catch (_) {}
+      return updated;
+    });
+
+    setMessages((prev) => {
+      const updated = prev.filter(
         (m) =>
           cleanDomain(m.targetId) !== targetClean &&
-          cleanDomain(m.senderDomain || '') !== targetClean
-      )
-    );
+          cleanDomain(m.senderDomain || '') !== targetClean &&
+          cleanDomain(m.senderId || '') !== targetClean
+      );
+      try {
+        localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(updated));
+      } catch (_) {}
+      return updated;
+    });
 
     try {
       await fetch(

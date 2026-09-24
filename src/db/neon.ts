@@ -795,113 +795,21 @@ export const neonDb = {
     }
   },
 
-  async getPeers(ownerDomain: string): Promise<PeerRecord[]> {
-    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
-    const url = getDbUrl();
-    if (url) {
-      try {
-        const sql = neon(url);
-        await initTables(sql);
-        const rows = await sql`
-          SELECT * FROM peers 
-          WHERE LOWER(owner_domain) = ${cleanOwner} OR LOWER(peer_domain) = ${cleanOwner}
-          ORDER BY last_seen DESC;
-        `;
+  async clearDirectMessages(userA: string, userB: string): Promise<void> {
+    const a = (userA || '').trim().toLowerCase();
+    const b = (userB || '').trim().toLowerCase();
+    if (!a || !b) return;
 
-        const peersMap = new Map<string, PeerRecord>();
-        const peersToHealAccepted: string[] = [];
-
-        for (const row of rows) {
-          const rOwner = (row.owner_domain || '').toLowerCase();
-          const rPeer = (row.peer_domain || '').toLowerCase();
-          const otherDomain = rOwner === cleanOwner ? rPeer : rOwner;
-          if (!otherDomain) continue;
-
-          let status = row.status;
-          let direction = row.direction;
-
-          if (rOwner !== cleanOwner) {
-            direction = direction === 'outgoing' ? 'incoming' : 'outgoing';
-          }
-
-          const existing = peersMap.get(otherDomain);
-          if (existing) {
-            if (status === 'accepted' || existing.status === 'accepted') {
-              existing.status = 'accepted';
-              peersToHealAccepted.push(otherDomain);
-            }
-          } else {
-            peersMap.set(otherDomain, {
-              id: `${cleanOwner}_${otherDomain}`,
-              owner_domain: cleanOwner,
-              peer_domain: otherDomain,
-              username: row.username,
-              avatar_color: row.avatar_color,
-              inbox_url: row.inbox_url,
-              status,
-              direction,
-              added_at: Number(row.added_at),
-              last_seen: Number(row.last_seen),
-            });
-          }
-        }
-
-        // Check if messages have been exchanged with any peers
-        try {
-          const conversed = await sql`
-            SELECT DISTINCT
-              CASE 
-                WHEN LOWER(sender_id) = ${cleanOwner} OR LOWER(sender_domain) = ${cleanOwner} THEN LOWER(target_id)
-                ELSE LOWER(sender_id)
-              END as peer_domain
-            FROM messages
-            WHERE target_type = 'p2p'
-              AND (
-                LOWER(sender_id) = ${cleanOwner} OR 
-                LOWER(sender_domain) = ${cleanOwner} OR 
-                LOWER(target_id) = ${cleanOwner}
-              );
-          `;
-          for (const c of conversed) {
-            const pd = (c.peer_domain || '').toLowerCase();
-            if (pd && pd !== cleanOwner && peersMap.has(pd)) {
-              const p = peersMap.get(pd)!;
-              if (p.status !== 'accepted') {
-                p.status = 'accepted';
-                peersToHealAccepted.push(pd);
-              }
-            }
-          }
-        } catch (_) {}
-
-        // Auto-heal PostgreSQL records
-        if (peersToHealAccepted.length > 0) {
-          (async () => {
-            try {
-              for (const pDomain of peersToHealAccepted) {
-                await sql`
-                  UPDATE peers
-                  SET status = 'accepted'
-                  WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${pDomain})
-                     OR (LOWER(owner_domain) = ${pDomain} AND LOWER(peer_domain) = ${cleanOwner});
-                `;
-              }
-            } catch (_) {}
-          })();
-        }
-
-        return Array.from(peersMap.values());
-      } catch (err) {
-        console.error('Neon getPeers error:', err);
-      }
-    }
-
-    return Array.from(memoryStore.peers.values()).filter((p) => p.owner_domain === cleanOwner);
-  },
-
-  async deletePeer(ownerDomain: string, peerDomain: string): Promise<void> {
-    const id = `${ownerDomain}_${peerDomain}`;
-    memoryStore.peers.delete(id);
+    memoryStore.messages = memoryStore.messages.filter(
+      (m) =>
+        !(
+          (m.target_type === 'p2p' || !m.target_type) &&
+          ((m.sender_id.toLowerCase() === a && m.target_id.toLowerCase() === b) ||
+           (m.sender_id.toLowerCase() === b && m.target_id.toLowerCase() === a) ||
+           (m.sender_domain.toLowerCase() === a && m.target_id.toLowerCase() === b) ||
+           (m.sender_domain.toLowerCase() === b && m.target_id.toLowerCase() === a))
+        )
+    );
     memoryStore.saveToDisk();
 
     const url = getDbUrl();
@@ -910,8 +818,213 @@ export const neonDb = {
         const sql = neon(url);
         await initTables(sql);
         await sql`
+          DELETE FROM messages 
+          WHERE (target_type = 'p2p' OR target_type IS NULL)
+            AND (
+              (LOWER(sender_id) = ${a} AND LOWER(target_id) = ${b}) OR
+              (LOWER(sender_id) = ${b} AND LOWER(target_id) = ${a}) OR
+              (LOWER(sender_domain) = ${a} AND LOWER(target_id) = ${b}) OR
+              (LOWER(sender_domain) = ${b} AND LOWER(target_id) = ${a})
+            );
+        `;
+      } catch (err) {
+        console.error('Neon clearDirectMessages error:', err);
+      }
+    }
+  },
+
+  async getPeers(ownerDomain: string): Promise<PeerRecord[]> {
+    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
+    if (!cleanOwner) return [];
+
+    const url = getDbUrl();
+    if (url) {
+      try {
+        const sql = neon(url);
+        await initTables(sql);
+
+        // Fetch peer records owned by cleanOwner, joining with counterpart record to resolve accepted status
+        // and joining with users table to get friend's authentic display name
+        const rows = await sql`
+          SELECT 
+            p.id,
+            p.owner_domain,
+            p.peer_domain,
+            p.username,
+            p.avatar_color,
+            p.inbox_url,
+            CASE 
+              WHEN p.status = 'accepted' OR cp.status = 'accepted' THEN 'accepted'
+              ELSE p.status
+            END as status,
+            p.direction,
+            p.added_at,
+            GREATEST(p.last_seen, COALESCE(cp.last_seen, 0)) as last_seen,
+            u.name as real_user_name
+          FROM peers p
+          LEFT JOIN peers cp 
+            ON LOWER(cp.owner_domain) = LOWER(p.peer_domain) 
+           AND LOWER(cp.peer_domain) = LOWER(p.owner_domain)
+          LEFT JOIN users u 
+            ON LOWER(u.email) = LOWER(p.peer_domain) OR LOWER(u.id) = LOWER(p.peer_domain)
+          WHERE LOWER(p.owner_domain) = ${cleanOwner}
+          ORDER BY p.added_at DESC;
+        `;
+
+        const peersMap = new Map<string, PeerRecord>();
+
+        for (const row of rows) {
+          const pd = (row.peer_domain || '').toLowerCase().trim();
+          if (!pd || pd === cleanOwner) continue;
+
+          // The username MUST always be the friend's name, never the owner's name!
+          const friendName = row.real_user_name || row.username || pd.split('@')[0];
+
+          peersMap.set(pd, {
+            id: `${cleanOwner}_${pd}`,
+            owner_domain: cleanOwner,
+            peer_domain: pd,
+            username: friendName,
+            avatar_color: row.avatar_color || 'purple',
+            inbox_url: row.inbox_url,
+            status: row.status,
+            direction: row.direction,
+            added_at: Number(row.added_at),
+            last_seen: Number(row.last_seen),
+          });
+        }
+
+        // Also check if any incoming request exists for cleanOwner that hasn't created a local record yet
+        const incomingRows = await sql`
+          SELECT 
+            cp.id,
+            cp.owner_domain as sender_domain,
+            cp.status,
+            cp.added_at,
+            cp.last_seen,
+            u.name as sender_name
+          FROM peers cp
+          LEFT JOIN users u 
+            ON LOWER(u.email) = LOWER(cp.owner_domain) OR LOWER(u.id) = LOWER(cp.owner_domain)
+          WHERE LOWER(cp.peer_domain) = ${cleanOwner}
+            AND NOT EXISTS (
+              SELECT 1 FROM peers p 
+              WHERE LOWER(p.owner_domain) = ${cleanOwner} 
+                AND LOWER(p.peer_domain) = LOWER(cp.owner_domain)
+            );
+        `;
+
+        for (const inc of incomingRows) {
+          const sender = (inc.sender_domain || '').toLowerCase().trim();
+          if (!sender || sender === cleanOwner || peersMap.has(sender)) continue;
+
+          const senderName = inc.sender_name || sender.split('@')[0];
+          peersMap.set(sender, {
+            id: `${cleanOwner}_${sender}`,
+            owner_domain: cleanOwner,
+            peer_domain: sender,
+            username: senderName,
+            avatar_color: 'purple',
+            inbox_url: `https://${sender}/api/p2p/inbox`,
+            status: inc.status || 'pending',
+            direction: 'incoming',
+            added_at: Number(inc.added_at),
+            last_seen: Number(inc.last_seen),
+          });
+        }
+
+        return Array.from(peersMap.values());
+      } catch (err) {
+        console.error('Neon getPeers error:', err);
+      }
+    }
+
+    // Memory Store fallback
+    const peersMap = new Map<string, PeerRecord>();
+    for (const p of memoryStore.peers.values()) {
+      if (p.owner_domain.toLowerCase() === cleanOwner) {
+        const pd = p.peer_domain.toLowerCase();
+        const cp = memoryStore.peers.get(`${pd}_${cleanOwner}`);
+        const status = (p.status === 'accepted' || cp?.status === 'accepted') ? 'accepted' : p.status;
+        peersMap.set(pd, { ...p, status });
+      }
+    }
+    for (const cp of memoryStore.peers.values()) {
+      if (cp.peer_domain.toLowerCase() === cleanOwner) {
+        const sender = cp.owner_domain.toLowerCase();
+        if (!peersMap.has(sender)) {
+          peersMap.set(sender, {
+            id: `${cleanOwner}_${sender}`,
+            owner_domain: cleanOwner,
+            peer_domain: sender,
+            username: sender.split('@')[0],
+            avatar_color: 'purple',
+            inbox_url: `https://${sender}/api/p2p/inbox`,
+            status: cp.status || 'pending',
+            direction: 'incoming',
+            added_at: cp.added_at,
+            last_seen: cp.last_seen,
+          });
+        }
+      }
+    }
+    return Array.from(peersMap.values());
+  },
+
+  async deletePeer(ownerDomain: string, peerDomain: string): Promise<void> {
+    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
+    const cleanPeer = (peerDomain || '').trim().toLowerCase();
+    if (!cleanOwner || !cleanPeer) return;
+
+    const id1 = `${cleanOwner}_${cleanPeer}`;
+    const id2 = `${cleanPeer}_${cleanOwner}`;
+
+    // 1. Remove from memory store
+    memoryStore.peers.delete(id1);
+    memoryStore.peers.delete(id2);
+    for (const key of Array.from(memoryStore.peers.keys())) {
+      const lk = key.toLowerCase();
+      if (lk === id1 || lk === id2) {
+        memoryStore.peers.delete(key);
+      }
+    }
+    // Also remove direct messages between them in memory
+    memoryStore.messages = memoryStore.messages.filter(
+      (m) =>
+        !(
+          (m.target_type === 'p2p' || !m.target_type) &&
+          ((m.sender_id.toLowerCase() === cleanOwner && m.target_id.toLowerCase() === cleanPeer) ||
+           (m.sender_id.toLowerCase() === cleanPeer && m.target_id.toLowerCase() === cleanOwner) ||
+           (m.sender_domain.toLowerCase() === cleanOwner && m.target_id.toLowerCase() === cleanPeer) ||
+           (m.sender_domain.toLowerCase() === cleanPeer && m.target_id.toLowerCase() === cleanOwner))
+        )
+    );
+    memoryStore.saveToDisk();
+
+    // 2. Remove from Neon PostgreSQL
+    const url = getDbUrl();
+    if (url) {
+      try {
+        const sql = neon(url);
+        await initTables(sql);
+        // Delete peer records in both directions
+        await sql`
           DELETE FROM peers 
-          WHERE owner_domain = ${ownerDomain} AND peer_domain = ${peerDomain};
+          WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${cleanPeer})
+             OR (LOWER(owner_domain) = ${cleanPeer} AND LOWER(peer_domain) = ${cleanOwner})
+             OR LOWER(id) = ${id1}
+             OR LOWER(id) = ${id2};
+        `;
+        // Delete direct messages between both parties
+        await sql`
+          DELETE FROM messages 
+          WHERE (target_type = 'p2p' OR target_type IS NULL)
+            AND (
+              (LOWER(sender_id) = ${cleanOwner} AND LOWER(target_id) = ${cleanPeer}) OR
+              (LOWER(sender_id) = ${cleanPeer} AND LOWER(target_id) = ${cleanOwner}) OR
+              (LOWER(sender_domain) = ${cleanOwner} AND LOWER(target_id) = ${cleanPeer}) OR
+              (LOWER(sender_domain) = ${cleanPeer} AND LOWER(target_id) = ${cleanOwner})
+            );
         `;
       } catch (err) {
         console.error('Neon deletePeer error:', err);

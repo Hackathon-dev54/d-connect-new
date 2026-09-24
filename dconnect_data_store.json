@@ -9,30 +9,5 @@
     }
   ],
   "messages": [],
-  "peers": [
-    {
-      "id": "killerbeast480@gmail.com_friend@gmail.com",
-      "owner_domain": "killerbeast480@gmail.com",
-      "peer_domain": "friend@gmail.com",
-      "username": "friend",
-      "avatar_color": "purple",
-      "inbox_url": "https://friend@gmail.com/api/p2p/inbox",
-      "status": "accepted",
-      "direction": "outgoing",
-      "added_at": 1790258883600,
-      "last_seen": 1790258883603
-    },
-    {
-      "id": "friend@gmail.com_killerbeast480@gmail.com",
-      "owner_domain": "friend@gmail.com",
-      "peer_domain": "killerbeast480@gmail.com",
-      "username": "KillerBeast",
-      "avatar_color": "indigo",
-      "inbox_url": "https://killerbeast480@gmail.com/api/p2p/inbox",
-      "status": "accepted",
-      "direction": "incoming",
-      "added_at": 1790258883600,
-      "last_seen": 1790258883603
-    }
-  ]
+  "peers": []
 }

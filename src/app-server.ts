@@ -1067,8 +1067,8 @@ export function createApp() {
     const clean = cleanDomain(req.params.domain);
     const ownerDomain = cleanDomain((req.query.ownerDomain as string) || getAppDomain(req));
     await neonDb.deletePeer(ownerDomain, clean);
-    await neonDb.clearMessages(clean);
     broadcast("peer_deleted", { domain: clean, ownerDomain });
+    broadcast("peer_deleted", { domain: ownerDomain, ownerDomain: clean });
     res.json({ success: true, domain: clean });
   });
 
