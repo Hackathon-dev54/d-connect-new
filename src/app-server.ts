@@ -423,6 +423,10 @@ export function createApp() {
 
       const now = Date.now();
 
+      // Clean up any stale or previous peer records between cleanSender and targetDomainOrEmail
+      // so neither side is stuck with an old record, old direction, or stale status
+      await neonDb.deletePeer(cleanSender, targetDomainOrEmail);
+
       // 1. Save Sender's outgoing record in Neon DB
       const senderRecord: PeerRecord = {
         id: `${cleanSender}_${targetDomainOrEmail}`,
@@ -453,7 +457,7 @@ export function createApp() {
       };
       await neonDb.upsertPeer(targetRecord);
 
-      // Broadcast SSE events
+      // Broadcast SSE events to target
       broadcast("peer_request_received", {
         domain: cleanSender,
         ownerDomain: targetDomainOrEmail,
@@ -467,6 +471,7 @@ export function createApp() {
         addedAt: now,
       });
 
+      // Broadcast SSE event to sender
       broadcast("peer_updated", {
         domain: targetDomainOrEmail,
         ownerDomain: cleanSender,
@@ -523,24 +528,31 @@ export function createApp() {
       const cleanPeer = cleanDomain(peerDomain);
       const newStatus = accept ? "accepted" : "rejected";
 
-      // Update both records in Neon DB
-      await neonDb.updatePeerStatus(cleanOwner, cleanPeer, newStatus);
-      await neonDb.updatePeerStatus(cleanPeer, cleanOwner, newStatus);
+      if (accept) {
+        // Update both records in Neon DB to accepted
+        await neonDb.updatePeerStatus(cleanOwner, cleanPeer, "accepted");
+        await neonDb.updatePeerStatus(cleanPeer, cleanOwner, "accepted");
 
-      // Broadcast SSE updates to both sides
-      broadcast("peer_updated", {
-        domain: cleanPeer,
-        ownerDomain: cleanOwner,
-        status: newStatus,
-        lastSeen: Date.now(),
-      });
+        // Broadcast SSE updates to both sides
+        broadcast("peer_updated", {
+          domain: cleanPeer,
+          ownerDomain: cleanOwner,
+          status: "accepted",
+          lastSeen: Date.now(),
+        });
 
-      broadcast("peer_updated", {
-        domain: cleanOwner,
-        ownerDomain: cleanPeer,
-        status: newStatus,
-        lastSeen: Date.now(),
-      });
+        broadcast("peer_updated", {
+          domain: cleanOwner,
+          ownerDomain: cleanPeer,
+          status: "accepted",
+          lastSeen: Date.now(),
+        });
+      } else {
+        // If declined, cleanly delete records so neither side is stuck with a rejected ghost
+        await neonDb.deletePeer(cleanOwner, cleanPeer);
+        broadcast("peer_deleted", { domain: cleanPeer, ownerDomain: cleanOwner });
+        broadcast("peer_deleted", { domain: cleanOwner, ownerDomain: cleanPeer });
+      }
 
       // Forward response to remote node if external domain
       if (cleanPeer.includes(".") && !cleanPeer.includes("@")) {

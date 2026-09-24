@@ -843,7 +843,7 @@ export const neonDb = {
         const sql = neon(url);
         await initTables(sql);
 
-        // Fetch peer records owned by cleanOwner, joining with counterpart record to resolve accepted status
+        // Fetch peer records owned by cleanOwner, joining with counterpart record to resolve status
         // and joining with users table to get friend's authentic display name
         const rows = await sql`
           SELECT 
@@ -853,10 +853,7 @@ export const neonDb = {
             p.username,
             p.avatar_color,
             p.inbox_url,
-            CASE 
-              WHEN p.status = 'accepted' OR cp.status = 'accepted' THEN 'accepted'
-              ELSE p.status
-            END as status,
+            p.status,
             p.direction,
             p.added_at,
             GREATEST(p.last_seen, COALESCE(cp.last_seen, 0)) as last_seen,
@@ -876,6 +873,8 @@ export const neonDb = {
         for (const row of rows) {
           const pd = (row.peer_domain || '').toLowerCase().trim();
           if (!pd || pd === cleanOwner) continue;
+          // Keep the newest record because rows are ordered by added_at DESC
+          if (peersMap.has(pd)) continue;
 
           // The username MUST always be the friend's name, never the owner's name!
           const friendName = row.real_user_name || row.username || pd.split('@')[0];
@@ -911,7 +910,8 @@ export const neonDb = {
               SELECT 1 FROM peers p 
               WHERE LOWER(p.owner_domain) = ${cleanOwner} 
                 AND LOWER(p.peer_domain) = LOWER(cp.owner_domain)
-            );
+            )
+          ORDER BY cp.added_at DESC;
         `;
 
         for (const inc of incomingRows) {
@@ -941,15 +941,15 @@ export const neonDb = {
 
     // Memory Store fallback
     const peersMap = new Map<string, PeerRecord>();
-    for (const p of memoryStore.peers.values()) {
+    const sortedPeers = Array.from(memoryStore.peers.values()).sort((a, b) => (b.added_at || 0) - (a.added_at || 0));
+    for (const p of sortedPeers) {
       if (p.owner_domain.toLowerCase() === cleanOwner) {
         const pd = p.peer_domain.toLowerCase();
-        const cp = memoryStore.peers.get(`${pd}_${cleanOwner}`);
-        const status = (p.status === 'accepted' || cp?.status === 'accepted') ? 'accepted' : p.status;
-        peersMap.set(pd, { ...p, status });
+        if (peersMap.has(pd)) continue; // Keep newest
+        peersMap.set(pd, { ...p });
       }
     }
-    for (const cp of memoryStore.peers.values()) {
+    for (const cp of sortedPeers) {
       if (cp.peer_domain.toLowerCase() === cleanOwner) {
         const sender = cp.owner_domain.toLowerCase();
         if (!peersMap.has(sender)) {

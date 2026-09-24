@@ -79,6 +79,11 @@ function cleanDomain(input: string): string {
   return (input || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
 }
 
+function getUserStorageKey(baseKey: string, userIdentifier: string): string {
+  const clean = cleanDomain(userIdentifier);
+  return clean ? `${baseKey}_${clean}` : baseKey;
+}
+
 export function deriveDomainUsername(hostOrDomain: string): string {
   if (!hostOrDomain) return 'node';
   const clean = hostOrDomain.replace(/^https?:\/\//, '').replace(/:\d+$/, '').trim().toLowerCase();
@@ -163,7 +168,9 @@ export default function App() {
 
   const [peers, setPeers] = useState<PeerIdentity[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.PEERS);
+      const email = googleUser?.email ? cleanDomain(googleUser.email) : '';
+      const key = email ? getUserStorageKey(STORAGE_KEYS.PEERS, email) : STORAGE_KEYS.PEERS;
+      const saved = localStorage.getItem(key) || localStorage.getItem(STORAGE_KEYS.PEERS);
       if (saved) return JSON.parse(saved);
     } catch (_) {}
     return [];
@@ -171,7 +178,9 @@ export default function App() {
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.MESSAGES);
+      const email = googleUser?.email ? cleanDomain(googleUser.email) : '';
+      const key = email ? getUserStorageKey(STORAGE_KEYS.MESSAGES, email) : STORAGE_KEYS.MESSAGES;
+      const saved = localStorage.getItem(key) || localStorage.getItem(STORAGE_KEYS.MESSAGES);
       if (saved) return JSON.parse(saved);
     } catch (_) {}
     return [];
@@ -303,7 +312,7 @@ export default function App() {
               avatarColor: sp.avatar_color || sp.avatarColor || 'purple',
               inboxUrl: sp.inbox_url || sp.inboxUrl || `https://${sp.peer_domain || sp.domain}/api/p2p/inbox`,
               status: sp.status || 'pending',
-              direction: sp.direction || 'outgoing',
+              direction: sp.direction || 'incoming',
               addedAt: Number(sp.added_at || sp.addedAt || Date.now()),
               lastSeen: Number(sp.last_seen || sp.lastSeen || Date.now()),
             }))
@@ -315,7 +324,7 @@ export default function App() {
             return prev;
           }
           try {
-            localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(serverPeers));
+            localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, cleanId), JSON.stringify(serverPeers));
           } catch (_) {}
           return serverPeers;
         });
@@ -339,7 +348,7 @@ export default function App() {
           }
           const merged = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
           try {
-            localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(merged.slice(-1000)));
+            localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, cleanId), JSON.stringify(merged.slice(-1000)));
           } catch (_) {}
           return merged;
         });
@@ -373,6 +382,18 @@ export default function App() {
     const emailDomain = cleanDomain(user.email);
     setMyDomain(emailDomain);
     localStorage.setItem(STORAGE_KEYS.DOMAIN, emailDomain);
+
+    try {
+      const cachedPeers = localStorage.getItem(getUserStorageKey(STORAGE_KEYS.PEERS, emailDomain));
+      if (cachedPeers) {
+        setPeers(JSON.parse(cachedPeers));
+      }
+      const cachedMsgs = localStorage.getItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, emailDomain));
+      if (cachedMsgs) {
+        setMessages(JSON.parse(cachedMsgs));
+      }
+    } catch (_) {}
+
     loadBootstrapDataForUser(emailDomain);
   };
 
@@ -411,10 +432,10 @@ export default function App() {
       localStorage.setItem(STORAGE_KEYS.USERNAME, myUsername);
       localStorage.setItem(STORAGE_KEYS.AVATAR, myAvatarColor);
       localStorage.setItem(STORAGE_KEYS.CHANNELS, JSON.stringify(channels));
-      localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(peers));
-      localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messages.slice(-1000)));
+      localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(peers));
+      localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, effectiveIdentifier), JSON.stringify(messages.slice(-1000)));
     } catch (_) {}
-  }, [myDomain, myUsername, myAvatarColor, channels, peers, messages]);
+  }, [myDomain, myUsername, myAvatarColor, channels, peers, messages, effectiveIdentifier]);
 
   // =========================================================================
   // REAL-TIME SERVER-SENT EVENTS (SSE) STREAM LISTENER
@@ -435,8 +456,10 @@ export default function App() {
           const ownerClean = cleanDomain(payload.ownerDomain || '');
           const myClean = cleanDomain(effectiveIdentifier);
 
-          if (!ownerClean || ownerClean === myClean || ownerClean === cleanDomain(myDomain)) {
+          if (!ownerClean || ownerClean === myClean) {
             const fromDomain = cleanDomain(payload.domain);
+            if (fromDomain === myClean) return;
+
             setPeers((prev) => {
               const existingIdx = prev.findIndex((p) => cleanDomain(p.domain) === fromDomain);
               const newPeer: PeerIdentity = {
@@ -450,13 +473,19 @@ export default function App() {
                 lastSeen: Date.now(),
               };
 
+              let updated: PeerIdentity[];
               if (existingIdx !== -1) {
                 if (prev[existingIdx].status === 'accepted') return prev;
                 const copy = [...prev];
                 copy[existingIdx] = { ...copy[existingIdx], ...newPeer };
-                return copy;
+                updated = copy;
+              } else {
+                updated = [...prev, newPeer];
               }
-              return [...prev, newPeer];
+              try {
+                localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
+              } catch (_) {}
+              return updated;
             });
             playChime();
           }
@@ -465,31 +494,42 @@ export default function App() {
           const ownerClean = cleanDomain(payload.ownerDomain || '');
           const myClean = cleanDomain(effectiveIdentifier);
 
-          if (!ownerClean || ownerClean === myClean || ownerClean === cleanDomain(myDomain)) {
-            setPeers((prev) =>
-              prev.map((p) => {
+          if (!ownerClean || ownerClean === myClean) {
+            setPeers((prev) => {
+              const updated = prev.map((p) => {
                 if (cleanDomain(p.domain) === targetClean) {
                   return {
                     ...p,
                     status: payload.status,
+                    direction: payload.direction || p.direction,
                     username: payload.username || p.username,
                     avatarColor: payload.avatarColor || p.avatarColor,
                     lastSeen: payload.lastSeen || Date.now(),
                   };
                 }
                 return p;
-              })
-            );
+              });
+              try {
+                localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
+              } catch (_) {}
+              return updated;
+            });
             if (payload.status === 'accepted') {
               playChime();
             }
           }
         } else if (type === 'peer_deleted') {
           const targetClean = cleanDomain(payload.domain);
+          const ownerClean = cleanDomain(payload.ownerDomain || '');
+          const myClean = cleanDomain(effectiveIdentifier);
+
+          // Only process deletion if targeted at this user
+          if (ownerClean && ownerClean !== myClean) return;
+
           setPeers((prev) => {
             const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
             try {
-              localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+              localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
             } catch (_) {}
             return updated;
           });
@@ -501,7 +541,7 @@ export default function App() {
                 cleanDomain(m.senderId || '') !== targetClean
             );
             try {
-              localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(updated));
+              localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, effectiveIdentifier), JSON.stringify(updated));
             } catch (_) {}
             return updated;
           });
@@ -573,13 +613,19 @@ export default function App() {
           lastSeen: Date.now(),
         };
 
+        let updated: PeerIdentity[];
         if (existingIdx !== -1) {
           if (prev[existingIdx].status === 'accepted') return prev;
           const copy = [...prev];
           copy[existingIdx] = { ...copy[existingIdx], ...newPeer };
-          return copy;
+          updated = copy;
+        } else {
+          updated = [...prev, newPeer];
         }
-        return [...prev, newPeer];
+        try {
+          localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
+        } catch (_) {}
+        return updated;
       });
 
       playChime();
@@ -747,7 +793,7 @@ export default function App() {
       const filtered = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
       const updated = [...filtered, newPeerObj];
       try {
-        localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+        localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
       } catch (_) {}
       return updated;
     });
@@ -778,7 +824,7 @@ export default function App() {
       setPeers((prev) => {
         const updated = prev.map((p) => (cleanDomain(p.domain) === targetClean ? updatedPeer : p));
         try {
-          localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+          localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
         } catch (_) {}
         return updated;
       });
@@ -787,7 +833,7 @@ export default function App() {
       setPeers((prev) => {
         const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
         try {
-          localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+          localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
         } catch (_) {}
         return updated;
       });
@@ -824,7 +870,7 @@ export default function App() {
     setPeers((prev) => {
       const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
       try {
-        localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(updated));
+        localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
       } catch (_) {}
       return updated;
     });
@@ -837,7 +883,7 @@ export default function App() {
           cleanDomain(m.senderId || '') !== targetClean
       );
       try {
-        localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(updated));
+        localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, effectiveIdentifier), JSON.stringify(updated));
       } catch (_) {}
       return updated;
     });
