@@ -563,17 +563,59 @@ export const neonDb = {
     return message;
   },
 
-  async getMessages(targetId?: string, limit = 100): Promise<MessageRecord[]> {
+  async getMessages(targetId?: string, userIdentifierOrLimit?: string | number, limitNum = 200): Promise<MessageRecord[]> {
+    let target = targetId ? targetId.trim().toLowerCase() : undefined;
+    let userIdentifier: string | undefined;
+    let limit = 200;
+
+    if (typeof userIdentifierOrLimit === 'number') {
+      limit = userIdentifierOrLimit;
+    } else if (typeof userIdentifierOrLimit === 'string') {
+      const parsed = parseInt(userIdentifierOrLimit, 10);
+      if (!isNaN(parsed) && String(parsed) === userIdentifierOrLimit.trim()) {
+        limit = parsed;
+      } else {
+        userIdentifier = userIdentifierOrLimit.trim().toLowerCase();
+      }
+    }
+    if (typeof limitNum === 'number') {
+      limit = limitNum;
+    }
+
     const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
         let rows;
-        if (targetId) {
+        if (target && userIdentifier) {
           rows = await sql`
             SELECT * FROM messages 
-            WHERE target_id = ${targetId} OR sender_domain = ${targetId} OR sender_id = ${targetId}
+            WHERE (target_id = ${target})
+               OR (target_type = 'p2p' AND (
+                    (LOWER(sender_id) = ${userIdentifier} AND LOWER(target_id) = ${target}) OR
+                    (LOWER(sender_id) = ${target} AND LOWER(target_id) = ${userIdentifier}) OR
+                    (LOWER(sender_domain) = ${userIdentifier} AND LOWER(target_id) = ${target}) OR
+                    (LOWER(sender_domain) = ${target} AND LOWER(target_id) = ${userIdentifier})
+                  ))
+            ORDER BY timestamp ASC 
+            LIMIT ${limit};
+          `;
+        } else if (userIdentifier) {
+          rows = await sql`
+            SELECT * FROM messages 
+            WHERE target_type = 'channel'
+               OR target_id = 'general'
+               OR LOWER(target_id) = ${userIdentifier}
+               OR LOWER(sender_id) = ${userIdentifier}
+               OR LOWER(sender_domain) = ${userIdentifier}
+            ORDER BY timestamp ASC 
+            LIMIT ${limit};
+          `;
+        } else if (target) {
+          rows = await sql`
+            SELECT * FROM messages 
+            WHERE target_id = ${target} OR LOWER(sender_domain) = ${target} OR LOWER(sender_id) = ${target}
             ORDER BY timestamp ASC 
             LIMIT ${limit};
           `;
@@ -602,9 +644,19 @@ export const neonDb = {
       }
     }
 
-    if (targetId) {
+    if (userIdentifier) {
       return memoryStore.messages.filter(
-        (m) => m.target_id === targetId || m.sender_domain === targetId || m.sender_id === targetId
+        (m) =>
+          m.target_type === 'channel' ||
+          m.target_id === 'general' ||
+          m.target_id.toLowerCase() === userIdentifier ||
+          m.sender_id.toLowerCase() === userIdentifier ||
+          m.sender_domain.toLowerCase() === userIdentifier
+      );
+    }
+    if (target) {
+      return memoryStore.messages.filter(
+        (m) => m.target_id === target || m.sender_domain.toLowerCase() === target || m.sender_id.toLowerCase() === target
       );
     }
     return memoryStore.messages.slice(-limit);
@@ -673,7 +725,78 @@ export const neonDb = {
     return peer;
   },
 
+  async updatePeerStatus(ownerDomain: string, peerDomain: string, status: string): Promise<void> {
+    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
+    const cleanPeer = (peerDomain || '').trim().toLowerCase();
+    if (!cleanOwner || !cleanPeer) return;
+
+    const id1 = `${cleanOwner}_${cleanPeer}`;
+    const id2 = `${cleanPeer}_${cleanOwner}`;
+    const now = Date.now();
+
+    const p1 = memoryStore.peers.get(id1);
+    if (p1) {
+      p1.status = status;
+      p1.last_seen = now;
+      memoryStore.peers.set(id1, p1);
+    }
+    const p2 = memoryStore.peers.get(id2);
+    if (p2) {
+      p2.status = status;
+      p2.last_seen = now;
+      memoryStore.peers.set(id2, p2);
+    }
+    memoryStore.saveToDisk();
+
+    const url = getDbUrl();
+    if (url) {
+      try {
+        const sql = neon(url);
+        await initTables(sql);
+
+        await sql`
+          UPDATE peers
+          SET status = ${status}, last_seen = ${now}
+          WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${cleanPeer})
+             OR (LOWER(owner_domain) = ${cleanPeer} AND LOWER(peer_domain) = ${cleanOwner})
+             OR id = ${id1}
+             OR id = ${id2};
+        `;
+
+        if (status === 'accepted') {
+          const rows = await sql`
+            SELECT * FROM peers 
+            WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${cleanPeer})
+               OR (LOWER(owner_domain) = ${cleanPeer} AND LOWER(peer_domain) = ${cleanOwner});
+          `;
+          const hasOwner = rows.some((r: any) => (r.owner_domain || '').toLowerCase() === cleanOwner);
+          const hasPeer = rows.some((r: any) => (r.owner_domain || '').toLowerCase() === cleanPeer);
+
+          if (!hasOwner) {
+            const cp = rows.find((r: any) => (r.owner_domain || '').toLowerCase() === cleanPeer);
+            await sql`
+              INSERT INTO peers (id, owner_domain, peer_domain, username, avatar_color, inbox_url, status, direction, added_at, last_seen)
+              VALUES (${id1}, ${cleanOwner}, ${cleanPeer}, ${cp?.username || cleanPeer.split('@')[0]}, ${cp?.avatar_color || 'purple'}, ${cp?.inbox_url || null}, 'accepted', 'incoming', ${now}, ${now})
+              ON CONFLICT (id) DO UPDATE SET status = 'accepted', last_seen = ${now};
+            `;
+          }
+          if (!hasPeer) {
+            const cp = rows.find((r: any) => (r.owner_domain || '').toLowerCase() === cleanOwner);
+            await sql`
+              INSERT INTO peers (id, owner_domain, peer_domain, username, avatar_color, inbox_url, status, direction, added_at, last_seen)
+              VALUES (${id2}, ${cleanPeer}, ${cleanOwner}, ${cp?.username || cleanOwner.split('@')[0]}, ${cp?.avatar_color || 'indigo'}, ${cp?.inbox_url || null}, 'accepted', 'incoming', ${now}, ${now})
+              ON CONFLICT (id) DO UPDATE SET status = 'accepted', last_seen = ${now};
+            `;
+          }
+        }
+      } catch (err) {
+        console.error('Neon updatePeerStatus error:', err);
+      }
+    }
+  },
+
   async getPeers(ownerDomain: string): Promise<PeerRecord[]> {
+    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
     const url = getDbUrl();
     if (url) {
       try {
@@ -681,27 +804,99 @@ export const neonDb = {
         await initTables(sql);
         const rows = await sql`
           SELECT * FROM peers 
-          WHERE owner_domain = ${ownerDomain}
+          WHERE LOWER(owner_domain) = ${cleanOwner} OR LOWER(peer_domain) = ${cleanOwner}
           ORDER BY last_seen DESC;
         `;
-        return rows.map((row: any) => ({
-          id: row.id,
-          owner_domain: row.owner_domain,
-          peer_domain: row.peer_domain,
-          username: row.username,
-          avatar_color: row.avatar_color,
-          inbox_url: row.inbox_url,
-          status: row.status,
-          direction: row.direction,
-          added_at: Number(row.added_at),
-          last_seen: Number(row.last_seen),
-        }));
+
+        const peersMap = new Map<string, PeerRecord>();
+        const peersToHealAccepted: string[] = [];
+
+        for (const row of rows) {
+          const rOwner = (row.owner_domain || '').toLowerCase();
+          const rPeer = (row.peer_domain || '').toLowerCase();
+          const otherDomain = rOwner === cleanOwner ? rPeer : rOwner;
+          if (!otherDomain) continue;
+
+          let status = row.status;
+          let direction = row.direction;
+
+          if (rOwner !== cleanOwner) {
+            direction = direction === 'outgoing' ? 'incoming' : 'outgoing';
+          }
+
+          const existing = peersMap.get(otherDomain);
+          if (existing) {
+            if (status === 'accepted' || existing.status === 'accepted') {
+              existing.status = 'accepted';
+              peersToHealAccepted.push(otherDomain);
+            }
+          } else {
+            peersMap.set(otherDomain, {
+              id: `${cleanOwner}_${otherDomain}`,
+              owner_domain: cleanOwner,
+              peer_domain: otherDomain,
+              username: row.username,
+              avatar_color: row.avatar_color,
+              inbox_url: row.inbox_url,
+              status,
+              direction,
+              added_at: Number(row.added_at),
+              last_seen: Number(row.last_seen),
+            });
+          }
+        }
+
+        // Check if messages have been exchanged with any peers
+        try {
+          const conversed = await sql`
+            SELECT DISTINCT
+              CASE 
+                WHEN LOWER(sender_id) = ${cleanOwner} OR LOWER(sender_domain) = ${cleanOwner} THEN LOWER(target_id)
+                ELSE LOWER(sender_id)
+              END as peer_domain
+            FROM messages
+            WHERE target_type = 'p2p'
+              AND (
+                LOWER(sender_id) = ${cleanOwner} OR 
+                LOWER(sender_domain) = ${cleanOwner} OR 
+                LOWER(target_id) = ${cleanOwner}
+              );
+          `;
+          for (const c of conversed) {
+            const pd = (c.peer_domain || '').toLowerCase();
+            if (pd && pd !== cleanOwner && peersMap.has(pd)) {
+              const p = peersMap.get(pd)!;
+              if (p.status !== 'accepted') {
+                p.status = 'accepted';
+                peersToHealAccepted.push(pd);
+              }
+            }
+          }
+        } catch (_) {}
+
+        // Auto-heal PostgreSQL records
+        if (peersToHealAccepted.length > 0) {
+          (async () => {
+            try {
+              for (const pDomain of peersToHealAccepted) {
+                await sql`
+                  UPDATE peers
+                  SET status = 'accepted'
+                  WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${pDomain})
+                     OR (LOWER(owner_domain) = ${pDomain} AND LOWER(peer_domain) = ${cleanOwner});
+                `;
+              }
+            } catch (_) {}
+          })();
+        }
+
+        return Array.from(peersMap.values());
       } catch (err) {
         console.error('Neon getPeers error:', err);
       }
     }
 
-    return Array.from(memoryStore.peers.values()).filter((p) => p.owner_domain === ownerDomain);
+    return Array.from(memoryStore.peers.values()).filter((p) => p.owner_domain === cleanOwner);
   },
 
   async deletePeer(ownerDomain: string, peerDomain: string): Promise<void> {

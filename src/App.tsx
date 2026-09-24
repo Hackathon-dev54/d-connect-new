@@ -276,60 +276,78 @@ export default function App() {
           setChannels(data.channels);
         }
 
-        // 1. Merge Peers without dropping local peers
-        let currentPeersToSync: PeerIdentity[] = [];
-        setPeers((prev) => {
-          const map = new Map<string, PeerIdentity>();
-          // Existing local peers
-          for (const p of prev) {
-            const k = cleanDomain(p.domain);
-            if (k) map.set(k, p);
-          }
-          // Server peers (from Neon DB / other devices)
-          if (Array.isArray(data.peers)) {
-            for (const sp of data.peers) {
-              const k = cleanDomain(sp.domain);
-              if (!k) continue;
-              const existing = map.get(k);
-              if (!existing) {
-                map.set(k, sp);
-              } else if (sp.status === 'accepted' || (sp.lastSeen || 0) >= (existing.lastSeen || 0)) {
-                map.set(k, { ...existing, ...sp });
-              }
+        // 1. Merge Peers without dropping local peers or downgrading accepted status
+        let localPeers: PeerIdentity[] = [];
+        try {
+          const saved = localStorage.getItem(STORAGE_KEYS.PEERS);
+          if (saved) localPeers = JSON.parse(saved);
+        } catch (_) {}
+        if (!Array.isArray(localPeers) || localPeers.length === 0) {
+          localPeers = peersRef.current || [];
+        }
+
+        const peerMap = new Map<string, PeerIdentity>();
+        for (const p of localPeers) {
+          const k = cleanDomain(p.domain);
+          if (k) peerMap.set(k, p);
+        }
+
+        if (Array.isArray(data.peers)) {
+          for (const sp of data.peers) {
+            const k = cleanDomain(sp.domain);
+            if (!k) continue;
+            const existing = peerMap.get(k);
+            if (!existing) {
+              peerMap.set(k, sp);
+            } else {
+              const isAccepted = existing.status === 'accepted' || sp.status === 'accepted';
+              peerMap.set(k, {
+                ...existing,
+                ...sp,
+                status: isAccepted ? 'accepted' : sp.status,
+                lastSeen: Math.max(existing.lastSeen || 0, sp.lastSeen || 0),
+              });
             }
           }
-          const merged = Array.from(map.values());
-          currentPeersToSync = merged;
-          return merged;
-        });
+        }
+        const mergedPeers = Array.from(peerMap.values());
+        setPeers(mergedPeers);
+        try {
+          localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(mergedPeers));
+        } catch (_) {}
 
         // 2. Merge Messages without dropping local messages
-        let currentMessagesToSync: ChatMessage[] = [];
-        setMessages((prev) => {
-          const msgMap = new Map<string, ChatMessage>();
-          for (const m of prev) {
-            if (m.id) msgMap.set(m.id, m);
+        let localMessages: ChatMessage[] = [];
+        try {
+          const saved = localStorage.getItem(STORAGE_KEYS.MESSAGES);
+          if (saved) localMessages = JSON.parse(saved);
+        } catch (_) {}
+
+        const msgMap = new Map<string, ChatMessage>();
+        for (const m of localMessages) {
+          if (m.id) msgMap.set(m.id, m);
+        }
+        if (Array.isArray(data.messages)) {
+          for (const sm of data.messages) {
+            if (sm.id) msgMap.set(sm.id, sm);
           }
-          if (Array.isArray(data.messages)) {
-            for (const sm of data.messages) {
-              if (sm.id) msgMap.set(sm.id, sm);
-            }
-          }
-          const merged = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
-          currentMessagesToSync = merged;
-          return merged;
-        });
+        }
+        const mergedMessages = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+        setMessages(mergedMessages);
+        try {
+          localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(mergedMessages.slice(-1000)));
+        } catch (_) {}
 
         // 3. Bidirectional Sync: Upload local peers & messages to server
         // so that if mobile had friends, the server & Neon DB receive them immediately for PC!
-        if (currentPeersToSync.length > 0 || currentMessagesToSync.length > 0) {
+        if (mergedPeers.length > 0 || mergedMessages.length > 0) {
           fetch('/api/chat/sync', {
             method: 'POST',
             headers: getApiHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
               userIdentifier: cleanId,
-              peers: currentPeersToSync,
-              messages: currentMessagesToSync,
+              peers: mergedPeers,
+              messages: mergedMessages,
             }),
           }).catch(() => {});
         }

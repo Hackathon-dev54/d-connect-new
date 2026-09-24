@@ -634,6 +634,9 @@ export function createApp() {
     };
 
     await neonDb.upsertPeer(peerObj);
+    await neonDb.updatePeerStatus(myDomain, domain, newStatus);
+    await neonDb.updatePeerStatus(domain, myDomain, newStatus);
+
     broadcast("peer_updated", {
       domain,
       ownerDomain: myDomain,
@@ -672,6 +675,8 @@ export function createApp() {
       last_seen: Date.now(),
     };
     await neonDb.upsertPeer(peerRecord);
+    await neonDb.updatePeerStatus(myDomain, senderDomain, "accepted");
+    await neonDb.updatePeerStatus(senderDomain, myDomain, "accepted");
 
     const messageRecord: MessageRecord = {
       id: id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -997,6 +1002,9 @@ export function createApp() {
     // Cross-domain forward if P2P and target has domain structure
     if (targetType === "p2p") {
       const cleanPeerDomain = cleanDomain(targetId);
+      await neonDb.updatePeerStatus(cleanSenderDomain, cleanPeerDomain, "accepted");
+      await neonDb.updatePeerStatus(cleanPeerDomain, cleanSenderDomain, "accepted");
+
       if (cleanPeerDomain.includes(".") && !cleanPeerDomain.includes("@")) {
         (async () => {
           for (const proto of ["https", "http"]) {
