@@ -9,6 +9,7 @@ import { GoogleAuthButton, GoogleUserProfile } from './components/GoogleAuthButt
 import { OnboardingAuth } from './components/OnboardingAuth';
 import { NeonDbModal } from './components/NeonDbModal';
 import { crawlerPingSender, CrawlerLogEntry, CrawlerTag } from './services/crawler-service';
+import { cleanDomain, deriveSubdomain, deriveDomainUsername } from './utils/domain';
 import {
   Globe,
   Radio,
@@ -80,27 +81,9 @@ const STORAGE_KEYS = {
   CHANNELS: 'dconnect_channels_v1',
 };
 
-function cleanDomain(input: string): string {
-  return (input || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-}
-
 function getUserStorageKey(baseKey: string, userIdentifier: string): string {
   const clean = cleanDomain(userIdentifier);
   return clean ? `${baseKey}_${clean}` : baseKey;
-}
-
-export function deriveDomainUsername(hostOrDomain: string): string {
-  if (!hostOrDomain) return 'node';
-  const clean = hostOrDomain.replace(/^https?:\/\//, '').replace(/:\d+$/, '').trim().toLowerCase();
-  const parts = clean.split('.');
-  if (parts.length >= 3) {
-    return parts[0];
-  }
-  if (parts.length === 2) {
-    if (parts[1] === 'local' || parts[1] === 'internal') return parts[0];
-    return parts[0];
-  }
-  return clean || 'node';
 }
 
 function getApiHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -116,6 +99,7 @@ export default function App() {
   }, []);
 
   const currentHost = typeof window !== 'undefined' ? window.location.host : '';
+  const urlNodeParam = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('node') : null;
 
   // Tab-isolated session user (allows 2 tabs to have different users or profiles)
   const [googleUser, setGoogleUser] = useState<GoogleUserProfile | null>(() => {
@@ -128,25 +112,28 @@ export default function App() {
     return null;
   });
 
+  // Node domain detection: defaults to current site's deployed host or simulated node parameter
+  const [myDomain, setMyDomain] = useState<string>(() => {
+    if (urlNodeParam) return cleanDomain(`${urlNodeParam}.local:3000`);
+    const saved = localStorage.getItem(STORAGE_KEYS.DOMAIN);
+    if (saved && saved !== 'my-node.local' && saved !== 'my-node.vercel.app' && saved !== 'd-connect-1.vercel.app') {
+      return saved;
+    }
+    return cleanDomain(currentHost) || 'node.chat.local';
+  });
+
+  // Auto-assigned username as domain or subdomain of the deployed site!
+  const [myUsername, setMyUsername] = useState<string>(() => {
+    if (urlNodeParam) return urlNodeParam.toLowerCase();
+    if (googleUser?.name) return googleUser.name;
+    const domain = myDomain || currentHost;
+    return deriveSubdomain(domain) || 'node';
+  });
+
   // User identity: either their Google email if logged in, or local domain
   const effectiveIdentifier = googleUser?.email
     ? cleanDomain(googleUser.email)
-    : cleanDomain(localStorage.getItem(STORAGE_KEYS.DOMAIN) || currentHost || 'd-connect-1.vercel.app');
-
-  // Node domain detection
-  const [myDomain, setMyDomain] = useState<string>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.DOMAIN);
-    if (saved && saved !== 'my-node.local' && saved !== 'my-node.vercel.app') {
-      return saved;
-    }
-    return currentHost || 'd-connect-1.vercel.app';
-  });
-
-  const [myUsername, setMyUsername] = useState<string>(() => {
-    if (googleUser?.name) return googleUser.name;
-    const domain = localStorage.getItem(STORAGE_KEYS.DOMAIN) || currentHost || 'd-connect-1.vercel.app';
-    return deriveDomainUsername(domain);
-  });
+    : cleanDomain(myDomain);
 
   const [myAvatarColor, setMyAvatarColor] = useState<string>(() => {
     return localStorage.getItem(STORAGE_KEYS.AVATAR) || 'indigo';
@@ -327,6 +314,12 @@ export default function App() {
         if (Array.isArray(data.channels) && data.channels.length > 0) {
           setChannels(data.channels);
         }
+        if (data.myUsername && !googleUser?.name && !urlNodeParam) {
+          setMyUsername(data.myUsername);
+        }
+        if (data.crawlerTags && Array.isArray(data.crawlerTags)) {
+          setMyCrawlerTags(data.crawlerTags);
+        }
 
         // 1. Authoritative server peers from Neon DB
         const serverPeers: PeerIdentity[] = Array.isArray(data.peers)
@@ -334,11 +327,12 @@ export default function App() {
               domain: cleanDomain(sp.peer_domain || sp.domain),
               username: sp.username || (sp.peer_domain || sp.domain).split('@')[0],
               avatarColor: sp.avatar_color || sp.avatarColor || 'purple',
-              inboxUrl: sp.inbox_url || sp.inboxUrl || `https://${sp.peer_domain || sp.domain}/api/p2p/inbox`,
+              inboxUrl: sp.inbox_url || sp.inboxUrl || `https://${sp.peer_domain || sp.domain}/api/crawler/ping`,
               status: sp.status || 'pending',
               direction: sp.direction || 'incoming',
               addedAt: Number(sp.added_at || sp.addedAt || Date.now()),
               lastSeen: Number(sp.last_seen || sp.lastSeen || Date.now()),
+              crawlerTags: sp.crawlerTags || [`#${sp.username || 'user'}`, `@${cleanDomain(sp.peer_domain || sp.domain)}`, 'crawler-ping:active'],
             }))
           : [];
 
@@ -1119,10 +1113,13 @@ export default function App() {
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2 truncate">
                 <span className="text-[10px] font-bold text-[#aeaeb2] uppercase tracking-wider">
-                  Username:
+                  Node User:
                 </span>
                 <span className="font-mono text-indigo-300 font-bold truncate">
                   {myUsername}
+                </span>
+                <span className="text-[9px] px-1 py-0.5 rounded bg-indigo-950/80 text-indigo-400 font-mono border border-indigo-800/40">
+                  Subdomain
                 </span>
               </div>
               <button
@@ -1134,16 +1131,20 @@ export default function App() {
               </button>
             </div>
 
+            <div className="text-[10px] font-mono text-[#8e8e93] truncate">
+              Domain: <span className="text-slate-300">{myDomain}</span>
+            </div>
+
             {/* Mini Discovery Tags for Crawler Connection */}
             <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-[#222226]">
               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-indigo-950/70 text-indigo-300 border border-indigo-800/40">
-                &lt;tag: #{myUsername.toLowerCase().replace(/[^a-z0-9]/g, '')} /&gt;
+                &lt;tag: #{myUsername.toLowerCase().replace(/[^a-z0-9_-]/g, '')} /&gt;
+              </span>
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-[#18181b] text-cyan-400 border border-cyan-900/50">
+                &lt;node: @{myDomain.toLowerCase().replace(/:\d+$/, '')} /&gt;
               </span>
               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-[#18181b] text-emerald-400 border border-emerald-900/50">
-                &lt;ping: active /&gt;
-              </span>
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-[#18181b] text-purple-300 border border-purple-900/50">
-                &lt;webhook: hybrid /&gt;
+                &lt;ping: ready /&gt;
               </span>
             </div>
           </div>
@@ -1781,22 +1782,23 @@ export default function App() {
             </div>
 
             <p className="text-xs text-[#8e8e93] leading-relaxed">
-              Enter any friend's Gmail (e.g.{' '}
+              Enter the remote site's domain or subdomain (e.g.{' '}
               <code className="px-1 py-0.5 rounded bg-[#141417] text-indigo-300 font-mono">
-                killerbeast480@gmail.com
-              </code>
-              ), username, or domain. The Web Crawler Ping sender discovers their tags and sends a hybrid webhook.
+                alice.railway.app
+              </code>{' '}
+              or <code className="px-1 py-0.5 rounded bg-[#141417] text-indigo-300 font-mono">node-2</code>).
+              The Web Crawler Ping sender crawls their dynamic discovery tags, persists the request into the database, and delivers it via hybrid webhook.
             </p>
 
             <form onSubmit={(e) => handleProbeAndAddPeer(e)} className="space-y-3">
               <div>
                 <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
-                  Friend's Gmail, Username, or Domain:
+                  Friend's Domain, Subdomain, or Tag:
                 </label>
                 <div className="flex items-center space-x-2">
                   <input
                     type="text"
-                    placeholder="e.g. friend@gmail.com or d-connect-2.vercel.app"
+                    placeholder="e.g. alice.railway.app or node-2"
                     value={peerInputDomain}
                     onChange={(e) => {
                       setPeerInputDomain(e.target.value);

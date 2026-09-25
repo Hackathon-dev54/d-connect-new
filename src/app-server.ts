@@ -16,13 +16,15 @@ export interface PeerIdentity {
 }
 
 export function getUserCrawlerTags(username: string, domain: string): string[] {
-  const safeUser = (username || "user").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const safeDomain = (domain || "node").toLowerCase().split(".")[0].replace(/[^a-z0-9]/g, "");
+  const safeUser = (username || "node").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  const safeDomain = (domain || "node").toLowerCase().replace(/^https?:\/\//, "").replace(/:\d+$/, "");
   return [
-    `#${safeUser || "user"}`,
-    `tag:${safeDomain || "node"}`,
+    `#${safeUser}`,
+    `@${safeDomain}`,
+    `tag:${safeUser}`,
     `crawler-ping:active`,
     `webhook:hybrid-v2`,
+    `db-sync:live`,
   ];
 }
 
@@ -57,7 +59,7 @@ export interface ChatMessage {
 
 let nodeConfig = {
   domain: "",
-  username: "PeerNode_" + Math.floor(1000 + Math.random() * 9000),
+  username: "",
   avatarColor: "indigo",
   customStatus: "Decentralized node ready",
 };
@@ -159,15 +161,30 @@ export function createApp() {
     });
   });
 
-  function getAppDomain(req: express.Request): string {
+  function getAppDomain(req?: express.Request): string {
     if (nodeConfig.domain && nodeConfig.domain.trim()) {
-      return nodeConfig.domain;
+      return cleanDomain(nodeConfig.domain);
     }
-    const hostHeader = req.headers.host;
-    if (hostHeader && !hostHeader.includes("localhost") && !hostHeader.includes("127.0.0.1")) {
-      return hostHeader;
+    if (req) {
+      const customNode = (req.query?.node as string) || (req.headers["x-node-id"] as string);
+      if (customNode && customNode.trim()) {
+        return cleanDomain(`${customNode.trim()}.local:3000`);
+      }
+      const hostHeader = (req.headers["x-forwarded-host"] as string) || req.headers.host;
+      if (hostHeader) {
+        return cleanDomain(hostHeader);
+      }
     }
-    return "my-node.local:3000";
+    return "node.local:3000";
+  }
+
+  function getNodeIdentity(req?: express.Request): { domain: string; username: string; subdomain: string } {
+    const domain = getAppDomain(req);
+    const subdomain = deriveSubdomain(domain);
+    const username = nodeConfig.username && nodeConfig.username.trim() && !nodeConfig.username.startsWith("PeerNode_")
+      ? nodeConfig.username.trim()
+      : subdomain;
+    return { domain, username, subdomain };
   }
 
   // 1. DATABASE STATUS & INFO (Neon PostgreSQL)
@@ -382,12 +399,13 @@ export function createApp() {
 
   // 3. Crawler Manifest & Discovery Tags
   const handleCrawlerManifest = (req: express.Request, res: express.Response) => {
-    const domain = getAppDomain(req);
+    const { domain, username } = getNodeIdentity(req);
     const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+    const tags = getUserCrawlerTags(username, domain);
     res.json({
       protocol: "CRAWLER-PING/2.1",
       domain: domain,
-      username: nodeConfig.username,
+      username: username,
       avatarColor: nodeConfig.avatarColor,
       status: "online",
       database: neonDb.isConfigured() ? "Neon PostgreSQL Live" : "Persistent Local Cache",
@@ -398,12 +416,7 @@ export function createApp() {
         manifest: `${protocol}://${domain}/api/crawler/manifest`,
         dbStatus: `${protocol}://${domain}/api/db/status`,
       },
-      crawlerTags: [
-        `#${deriveSubdomain(domain)}`,
-        "crawler-ping:active",
-        "webhook:hybrid-v2",
-        "federated-db",
-      ],
+      crawlerTags: tags,
       timestamp: Date.now(),
     });
   };
@@ -1170,12 +1183,16 @@ export function createApp() {
         crawlerTags: getUserCrawlerTags(p.username, p.peer_domain),
       }));
 
+      const { domain: autoDomain, username: autoUsername } = getNodeIdentity(req);
+      const effectiveUser = cleanUser || autoDomain;
+      const effectiveUsername = autoUsername || deriveSubdomain(effectiveUser);
+
       res.json({
-        myDomain: cleanUser,
-        myUsername: nodeConfig.username,
+        myDomain: effectiveUser,
+        myUsername: effectiveUsername,
         myAvatarColor: nodeConfig.avatarColor,
         customStatus: nodeConfig.customStatus,
-        crawlerTags: getUserCrawlerTags(nodeConfig.username, cleanUser),
+        crawlerTags: getUserCrawlerTags(effectiveUsername, effectiveUser),
         channels:
           formattedChannels.length > 0
             ? formattedChannels
@@ -1187,11 +1204,15 @@ export function createApp() {
       });
     } catch (err: any) {
       console.error("Bootstrap error, falling back to in-memory store:", err);
+      const { domain: autoDomain, username: autoUsername } = getNodeIdentity(req);
+      const effectiveUser = cleanUser || autoDomain;
+      const effectiveUsername = autoUsername || deriveSubdomain(effectiveUser);
       res.json({
-        myDomain: cleanUser,
-        myUsername: nodeConfig.username,
+        myDomain: effectiveUser,
+        myUsername: effectiveUsername,
         myAvatarColor: nodeConfig.avatarColor,
         customStatus: nodeConfig.customStatus,
+        crawlerTags: getUserCrawlerTags(effectiveUsername, effectiveUser),
         channels: [{ id: "general", name: "general", description: "Global broadcast channel for all connected peers.", createdAt: 1700000000000, isDefault: true }],
         messages: [],
         peers: [],

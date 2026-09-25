@@ -18,6 +18,7 @@ import {
   fetchAuthConfig,
   AuthConfig,
 } from '../services/google-auth';
+import { cleanDomain, deriveSubdomain } from '../utils/domain';
 
 interface OnboardingAuthProps {
   onAuthenticated: (user: GoogleUserProfile) => void;
@@ -43,16 +44,21 @@ export const OnboardingAuth: React.FC<OnboardingAuthProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Auto-detect domain & auto-assign username from subdomain/domain
+  const currentHost = typeof window !== 'undefined' ? window.location.host : '';
+  const detectedDomain = cleanDomain(currentHost) || 'node.chat.local';
+  const detectedSubdomain = deriveSubdomain(detectedDomain) || 'node';
+
   // Direct email sign-in / profile setup
-  const [emailInput, setEmailInput] = useState('killerbeast480@gmail.com');
-  const [displayName, setDisplayName] = useState('Killer Beast');
+  const [emailInput, setEmailInput] = useState(() => `${detectedSubdomain}@${detectedDomain}`);
+  const [displayName, setDisplayName] = useState(() => detectedSubdomain);
   const [selectedColor, setSelectedColor] = useState('indigo');
   const [isCustomMode, setIsCustomMode] = useState(false);
 
   useEffect(() => {
     fetchAuthConfig().then((cfg) => {
       setAuthConfig(cfg);
-      if (cfg?.username) {
+      if (cfg?.username && !cfg.username.startsWith('PeerNode_')) {
         setDisplayName(cfg.username);
       }
     });
@@ -214,55 +220,70 @@ export const OnboardingAuth: React.FC<OnboardingAuthProps> = ({
             </span>
           </div>
 
-          {/* Quick preset sign-in accounts (for mobile or testing multi-user) */}
+          {/* Auto-Assigned Identity & Quick Select */}
           <div className="space-y-2">
-            <div className="text-[11px] font-bold text-[#8e8e93] uppercase tracking-wider">
-              Quick Select Account
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] font-bold text-[#8e8e93] uppercase tracking-wider">
+                Deployment Node Identity
+              </div>
+              <span className="text-[10px] text-emerald-400 font-mono bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">
+                Auto-assigned: no conflict
+              </span>
             </div>
 
             <div className="grid grid-cols-1 gap-2">
               <button
                 type="button"
-                onClick={() => handleQuickSelect('killerbeast480@gmail.com', 'Killer Beast', 'indigo')}
+                onClick={() => handleQuickSelect(`${detectedSubdomain}@${detectedDomain}`, detectedSubdomain, 'indigo')}
                 className={`flex items-center justify-between p-2.5 rounded-xl border text-left transition cursor-pointer ${
-                  emailInput === 'killerbeast480@gmail.com'
+                  emailInput === `${detectedSubdomain}@${detectedDomain}`
                     ? 'border-indigo-500/80 bg-indigo-950/30'
                     : 'border-[#222226] bg-[#141417] hover:bg-[#1a1a1f]'
                 }`}
               >
                 <div className="flex items-center space-x-2.5 min-w-0">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white font-bold text-xs shrink-0">
-                    KB
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white font-bold text-xs shrink-0 uppercase">
+                    {detectedSubdomain.slice(0, 2)}
                   </div>
                   <div className="min-w-0">
-                    <p className="text-xs font-bold text-white truncate">Killer Beast (Primary)</p>
-                    <p className="text-[10px] font-mono text-[#8e8e93] truncate">killerbeast480@gmail.com</p>
+                    <div className="flex items-center space-x-1.5">
+                      <p className="text-xs font-bold text-white truncate">{detectedSubdomain}</p>
+                      <span className="text-[9px] bg-indigo-900/60 text-indigo-300 font-mono px-1 rounded">
+                        #{detectedSubdomain}
+                      </span>
+                    </div>
+                    <p className="text-[10px] font-mono text-[#8e8e93] truncate">{detectedDomain}</p>
                   </div>
                 </div>
-                {emailInput === 'killerbeast480@gmail.com' && (
+                {emailInput === `${detectedSubdomain}@${detectedDomain}` && (
                   <CheckCircle2 className="h-4 w-4 text-indigo-400 shrink-0" />
                 )}
               </button>
 
               <button
                 type="button"
-                onClick={() => handleQuickSelect('friend.test@gmail.com', 'Alex Friend', 'emerald')}
+                onClick={() => handleQuickSelect(`peer-${detectedSubdomain}@remote.node.org`, `peer-${detectedSubdomain}`, 'emerald')}
                 className={`flex items-center justify-between p-2.5 rounded-xl border text-left transition cursor-pointer ${
-                  emailInput === 'friend.test@gmail.com'
+                  emailInput.startsWith('peer-')
                     ? 'border-emerald-500/80 bg-emerald-950/30'
                     : 'border-[#222226] bg-[#141417] hover:bg-[#1a1a1f]'
                 }`}
               >
                 <div className="flex items-center space-x-2.5 min-w-0">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600 text-white font-bold text-xs shrink-0">
-                    AF
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600 text-white font-bold text-xs shrink-0 uppercase">
+                    PE
                   </div>
                   <div className="min-w-0">
-                    <p className="text-xs font-bold text-white truncate">Alex Friend (Contact)</p>
-                    <p className="text-[10px] font-mono text-[#8e8e93] truncate">friend.test@gmail.com</p>
+                    <div className="flex items-center space-x-1.5">
+                      <p className="text-xs font-bold text-white truncate">Peer Simulator</p>
+                      <span className="text-[9px] bg-emerald-900/60 text-emerald-300 font-mono px-1 rounded">
+                        #peer-{detectedSubdomain}
+                      </span>
+                    </div>
+                    <p className="text-[10px] font-mono text-[#8e8e93] truncate">remote.node.org (Simulate 2nd site)</p>
                   </div>
                 </div>
-                {emailInput === 'friend.test@gmail.com' && (
+                {emailInput.startsWith('peer-') && (
                   <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
                 )}
               </button>

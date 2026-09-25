@@ -77,15 +77,17 @@ export class CrawlerPingSender {
     this.listeners.forEach((fn) => fn(this.getLogs()));
   }
 
-  // Generate mini crawler discovery tags for a user/scene
+  // Generate dynamic crawler discovery tags for a user/domain
   public generateMiniTags(username: string, domain: string): string[] {
-    const safeUser = (username || 'user').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const safeDomain = (domain || 'node').toLowerCase().split('.')[0].replace(/[^a-z0-9]/g, '');
+    const safeUser = (username || 'node').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    const cleanDom = (domain || 'node').toLowerCase().replace(/^https?:\/\//, '').replace(/:\d+$/, '');
     return [
       `#${safeUser}`,
-      `tag:${safeDomain}`,
+      `@${cleanDom}`,
+      `tag:${safeUser}`,
       `crawler-ping:active`,
       `webhook:hybrid-v2`,
+      `db-sync:live`,
     ];
   }
 

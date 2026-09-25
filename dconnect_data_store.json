@@ -69,6 +69,30 @@
       "direction": "incoming",
       "added_at": 1790341937055,
       "last_seen": 1790341947519
+    },
+    {
+      "id": "killerbeast480@gmail.com_<tag: #udemycouses",
+      "owner_domain": "killerbeast480@gmail.com",
+      "peer_domain": "<tag: #udemycouses",
+      "username": "<tag: #udemycouses",
+      "avatar_color": "purple",
+      "inbox_url": "https://<tag: #udemycouses/api/crawler/ping",
+      "status": "pending",
+      "direction": "outgoing",
+      "added_at": 1790342522335,
+      "last_seen": 1790342522335
+    },
+    {
+      "id": "<tag: #udemycouses_killerbeast480@gmail.com",
+      "owner_domain": "<tag: #udemycouses",
+      "peer_domain": "killerbeast480@gmail.com",
+      "username": "KillerBeast",
+      "avatar_color": "indigo",
+      "inbox_url": "https://killerbeast480@gmail.com/api/crawler/ping",
+      "status": "pending",
+      "direction": "incoming",
+      "added_at": 1790342522335,
+      "last_seen": 1790342522335
     }
   ]
 }
