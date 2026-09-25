@@ -92,7 +92,7 @@ export class CrawlerPingSender {
   }
 
   // Probe and crawl target discovery tags before sending
-  public async probeTarget(target: string): Promise<{ success: boolean; tags: CrawlerTag[]; nodeInfo?: any }> {
+  public async probeTarget(target: string, currentHost?: string): Promise<{ success: boolean; tags: CrawlerTag[]; nodeInfo?: any; error?: string }> {
     const cleanTarget = (target || '').trim().toLowerCase();
     this.addLog({
       type: 'crawler_scan',
@@ -105,7 +105,8 @@ export class CrawlerPingSender {
 
     const start = Date.now();
     try {
-      const res = await fetch(`/api/crawler/probe?target=${encodeURIComponent(cleanTarget)}`);
+      const url = `/api/crawler/probe?target=${encodeURIComponent(cleanTarget)}${currentHost ? `&currentHost=${encodeURIComponent(currentHost)}` : ''}`;
+      const res = await fetch(url);
       const latency = Date.now() - start;
       if (res.ok) {
         const data = await res.json();
@@ -118,6 +119,9 @@ export class CrawlerPingSender {
           details: `Crawl completed in ${latency}ms. Discovered ${data.tags?.length || 0} meta tags.`,
         });
         return { success: true, tags: data.tags || [], nodeInfo: data.nodeInfo };
+      } else {
+        const err = await res.json().catch(() => ({}));
+        return { success: false, tags: [], error: err.error || `HTTP ${res.status}` };
       }
     } catch (err: any) {
       this.addLog({
@@ -128,15 +132,25 @@ export class CrawlerPingSender {
         status: 'failed',
         details: err?.message || 'Crawler probe failed',
       });
+      return {
+        success: false,
+        tags: [],
+        error: err?.message || 'Crawler probe failed',
+      };
     }
+  }
 
-    return {
-      success: true,
-      tags: [
-        { name: 'crawler-node', value: cleanTarget },
-        { name: 'hybrid-webhook', value: 'supported' },
-      ],
-    };
+  // Crawl sync updates for messages and peers on demand (Clever Web Crawler Method)
+  public async crawlSync(userIdentifier: string, activeTargetId?: string): Promise<{ success: boolean; messages?: any[]; peers?: any[] }> {
+    try {
+      const url = `/api/crawler/sync?userIdentifier=${encodeURIComponent(userIdentifier)}${activeTargetId ? `&targetId=${encodeURIComponent(activeTargetId)}` : ''}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        return { success: true, messages: data.messages, peers: data.peers };
+      }
+    } catch (_) {}
+    return { success: false };
   }
 
   // Send a Crawler Ping + Hybrid Webhook to destination

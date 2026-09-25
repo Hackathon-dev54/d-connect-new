@@ -1,44 +1,60 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  PeerIdentity,
-  ChatChannel,
-  ChatMessage,
-} from './types';
-import { PWAInstallButton } from './components/PWAInstallButton';
-import { GoogleAuthButton, GoogleUserProfile } from './components/GoogleAuthButton';
-import { OnboardingAuth } from './components/OnboardingAuth';
-import { NeonDbModal } from './components/NeonDbModal';
-import { crawlerPingSender, CrawlerLogEntry, CrawlerTag } from './services/crawler-service';
-import { cleanDomain, deriveSubdomain, deriveDomainUsername } from './utils/domain';
-import {
-  Globe,
-  Radio,
   Send,
   UserPlus,
-  Check,
-  X,
-  Plus,
-  Trash2,
-  Image as ImageIcon,
-  Copy,
-  Menu,
+  Radio,
   Sparkles,
-  Settings,
-  Reply,
-  Clock,
   Hash,
-  Smartphone,
-  RefreshCw,
-  Database,
-  Users,
-  ShieldCheck,
-  LogOut,
-  Activity,
+  Globe,
+  Settings,
+  X,
+  Check,
+  Copy,
+  Clock,
+  Menu,
   Terminal,
-  Tag,
-  Zap,
+  Database,
+  Trash2,
+  RefreshCw,
   Search,
+  Activity,
+  Image as ImageIcon,
+  Reply,
+  Smartphone,
+  LogOut,
+  Zap,
+  Shield,
+  Layers,
 } from 'lucide-react';
+import { GoogleAuthButton, GoogleUserProfile } from './components/GoogleAuthButton';
+import { OnboardingAuth } from './components/OnboardingAuth';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { NeonDbModal } from './components/NeonDbModal';
+import {
+  crawlerPingSender,
+  CrawlerLogEntry,
+  CrawlerTag,
+} from './services/crawler-service';
+import { PeerIdentity, ChatChannel, ChatMessage } from './types';
+import { cleanDomain, deriveSubdomain, resolveTargetHost } from './utils/domain';
+
+// Audio chime using Web Audio API (no external file dependencies)
+function playChime() {
+  try {
+    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.25);
+  } catch (_) {}
+}
 
 const AVATAR_COLORS: Record<string, { bg: string; text: string; ring: string }> = {
   indigo: { bg: 'bg-indigo-600', text: 'text-white', ring: 'ring-indigo-400' },
@@ -49,36 +65,13 @@ const AVATAR_COLORS: Record<string, { bg: string; text: string; ring: string }> 
   cyan: { bg: 'bg-cyan-600', text: 'text-white', ring: 'ring-cyan-400' },
 };
 
-function playChime() {
-  try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.1);
-
-    gain.gain.setValueAtTime(0.08, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start();
-    osc.stop(ctx.currentTime + 0.3);
-  } catch (_) {}
-}
-
 const STORAGE_KEYS = {
-  DOMAIN: 'dconnect_my_domain',
-  USERNAME: 'dconnect_my_username',
-  AVATAR: 'dconnect_my_avatar',
-  PEERS: 'dconnect_peers_v1',
-  MESSAGES: 'dconnect_messages_v1',
-  CHANNELS: 'dconnect_channels_v1',
+  DOMAIN: 'dconnect_node_domain_v2',
+  USERNAME: 'dconnect_node_username_v2',
+  AVATAR: 'dconnect_node_avatar_v2',
+  PEERS: 'dconnect_peers_v2',
+  MESSAGES: 'dconnect_messages_v2',
+  CHANNELS: 'dconnect_channels_v2',
 };
 
 function getUserStorageKey(baseKey: string, userIdentifier: string): string {
@@ -86,22 +79,11 @@ function getUserStorageKey(baseKey: string, userIdentifier: string): string {
   return clean ? `${baseKey}_${clean}` : baseKey;
 }
 
-function getApiHeaders(extra?: Record<string, string>): Record<string, string> {
-  return { ...extra };
-}
-
 export default function App() {
-  // Clear any old client-cached DB URLs
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('dconnect_neon_db_url');
-    }
-  }, []);
-
   const currentHost = typeof window !== 'undefined' ? window.location.host : '';
   const urlNodeParam = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('node') : null;
 
-  // Tab-isolated session user (allows 2 tabs to have different users or profiles)
+  // Tab-isolated session user
   const [googleUser, setGoogleUser] = useState<GoogleUserProfile | null>(() => {
     try {
       const tabSaved = sessionStorage.getItem('dconnect_tab_user');
@@ -112,13 +94,11 @@ export default function App() {
     return null;
   });
 
-  // Node domain detection: defaults to current site's deployed host or simulated node parameter
+  // Node domain detection: defaults to current site's deployed host
   const [myDomain, setMyDomain] = useState<string>(() => {
     if (urlNodeParam) return cleanDomain(`${urlNodeParam}.local:3000`);
     const saved = localStorage.getItem(STORAGE_KEYS.DOMAIN);
-    if (saved && saved !== 'my-node.local' && saved !== 'my-node.vercel.app' && saved !== 'd-connect-1.vercel.app') {
-      return saved;
-    }
+    if (saved && !saved.includes('my-node')) return saved;
     return cleanDomain(currentHost) || 'node.chat.local';
   });
 
@@ -144,6 +124,7 @@ export default function App() {
   const [showCrawlerConsole, setShowCrawlerConsole] = useState<boolean>(false);
   const [pingTestResult, setPingTestResult] = useState<string | null>(null);
   const [isSendingPingTest, setIsSendingPingTest] = useState<boolean>(false);
+  const [isSyncingCrawler, setIsSyncingCrawler] = useState<boolean>(false);
   const [myCrawlerTags, setMyCrawlerTags] = useState<string[]>([]);
   const [discoveredTags, setDiscoveredTags] = useState<CrawlerTag[]>([]);
 
@@ -160,7 +141,7 @@ export default function App() {
     setMyCrawlerTags(tags);
   }, [myUsername, effectiveIdentifier]);
 
-  // Channels, Peers, Messages persisted in LocalStorage & Neon DB
+  // Channels, Peers, Messages
   const [channels, setChannels] = useState<ChatChannel[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CHANNELS);
@@ -228,7 +209,6 @@ export default function App() {
   const [peerInputNote, setPeerInputNote] = useState('');
   const [peerProbeStatus, setPeerProbeStatus] = useState<string | null>(null);
   const [isProbingPeer, setIsProbingPeer] = useState(false);
-  const [discoveredUsers, setDiscoveredUsers] = useState<any[]>([]);
 
   const [showNodeConfigModal, setShowNodeConfigModal] = useState(false);
   const [editDomain, setEditDomain] = useState('');
@@ -243,19 +223,11 @@ export default function App() {
   const [showCapacitorModal, setShowCapacitorModal] = useState(false);
   const [showNeonModal, setShowNeonModal] = useState(false);
   const [neonConfigured, setNeonConfigured] = useState(false);
-  const [dbStatusInfo, setDbStatusInfo] = useState<{
-    configured: boolean;
-    engine?: string;
-    message?: string;
-    detectedEnvKeys?: string[];
-  } | null>(null);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const peersRef = useRef(peers);
-  peersRef.current = peers;
 
-  // Auto-scroll messages to bottom
+  // Auto-scroll messages smoothly
   const scrollToBottom = useCallback(() => {
     if (messagesContainerRef.current) {
       messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
@@ -264,49 +236,22 @@ export default function App() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, activeTarget, scrollToBottom]);
-
-  // Equality comparator for peers to avoid redundant state updates and UI blinking
-  const arePeersEqual = (a: PeerIdentity[], b: PeerIdentity[]): boolean => {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      const pA = a[i];
-      const pB = b.find((p) => cleanDomain(p.domain) === cleanDomain(pA.domain));
-      if (!pB) return false;
-      if (
-        pA.status !== pB.status ||
-        pA.username !== pB.username ||
-        pA.direction !== pB.direction ||
-        pA.avatarColor !== pB.avatarColor
-      ) {
-        return false;
-      }
-    }
-    return true;
-  };
+  }, [messages.length, activeTarget.id, scrollToBottom]);
 
   // Load Neon DB status and Bootstrap Data from server
-  const loadBootstrapDataForUser = useCallback(async (userIdentifier: string) => {
-    const cleanId = cleanDomain(userIdentifier);
+  const loadBootstrapData = useCallback(async () => {
+    const cleanId = cleanDomain(effectiveIdentifier);
     if (!cleanId) return;
+
     try {
-      const apiHeaders = getApiHeaders();
       const [dbRes, bootRes] = await Promise.all([
-        fetch('/api/db/status', { headers: apiHeaders }),
-        fetch(`/api/chat/bootstrap?userIdentifier=${encodeURIComponent(cleanId)}`, { headers: apiHeaders }),
+        fetch('/api/db/status'),
+        fetch(`/api/chat/bootstrap?userIdentifier=${encodeURIComponent(cleanId)}`),
       ]);
 
       if (dbRes.ok) {
         const dbData = await dbRes.json();
         setNeonConfigured(Boolean(dbData.configured));
-        setDbStatusInfo(dbData);
-      } else {
-        const text = await dbRes.text().catch(() => "");
-        setDbStatusInfo({
-          configured: false,
-          engine: `Server Error (${dbRes.status})`,
-          message: text.slice(0, 150) || `Server responded with status ${dbRes.status}. Please check Vercel function logs.`,
-        });
       }
 
       if (bootRes.ok) {
@@ -321,72 +266,43 @@ export default function App() {
           setMyCrawlerTags(data.crawlerTags);
         }
 
-        // 1. Authoritative server peers from Neon DB
-        const serverPeers: PeerIdentity[] = Array.isArray(data.peers)
-          ? data.peers.map((sp: any) => ({
-              domain: cleanDomain(sp.peer_domain || sp.domain),
-              username: sp.username || (sp.peer_domain || sp.domain).split('@')[0],
-              avatarColor: sp.avatar_color || sp.avatarColor || 'purple',
-              inboxUrl: sp.inbox_url || sp.inboxUrl || `https://${sp.peer_domain || sp.domain}/api/crawler/ping`,
-              status: sp.status || 'pending',
-              direction: sp.direction || 'incoming',
-              addedAt: Number(sp.added_at || sp.addedAt || Date.now()),
-              lastSeen: Number(sp.last_seen || sp.lastSeen || Date.now()),
-              crawlerTags: sp.crawlerTags || [`#${sp.username || 'user'}`, `@${cleanDomain(sp.peer_domain || sp.domain)}`, 'crawler-ping:active'],
-            }))
-          : [];
+        // Server authoritative peers
+        if (Array.isArray(data.peers)) {
+          const serverPeers: PeerIdentity[] = data.peers.map((sp: any) => ({
+            domain: cleanDomain(sp.peer_domain || sp.domain),
+            username: sp.username || deriveSubdomain(sp.peer_domain || sp.domain),
+            avatarColor: sp.avatar_color || sp.avatarColor || 'purple',
+            inboxUrl: sp.inbox_url || sp.inboxUrl || `https://${sp.peer_domain || sp.domain}/api/crawler/ping`,
+            status: sp.status || 'pending',
+            direction: sp.direction || 'incoming',
+            addedAt: Number(sp.added_at || sp.addedAt || Date.now()),
+            lastSeen: Number(sp.last_seen || sp.lastSeen || Date.now()),
+            crawlerTags: sp.crawlerTags || [`#${sp.username || 'user'}`, `@${cleanDomain(sp.peer_domain || sp.domain)}`, 'crawler-ping:active'],
+          }));
 
-        // Avoid re-renders if peers have not changed
-        setPeers((prev) => {
-          if (arePeersEqual(prev, serverPeers)) {
-            return prev;
-          }
+          setPeers(serverPeers);
           try {
             localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, cleanId), JSON.stringify(serverPeers));
           } catch (_) {}
-          return serverPeers;
-        });
+        }
 
-        // 2. Authoritative server messages
-        const serverMessages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : [];
-        setMessages((prev) => {
-          if (
-            prev.length === serverMessages.length &&
-            prev.length > 0 &&
-            prev[prev.length - 1]?.id === serverMessages[serverMessages.length - 1]?.id
-          ) {
-            return prev;
-          }
-          const msgMap = new Map<string, ChatMessage>();
-          for (const m of serverMessages) {
-            if (m.id) msgMap.set(m.id, m);
-          }
-          for (const m of prev) {
-            if (m.id && !msgMap.has(m.id)) msgMap.set(m.id, m);
-          }
-          const merged = Array.from(msgMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+        // Server authoritative messages
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          setMessages(data.messages);
           try {
-            localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, cleanId), JSON.stringify(merged.slice(-1000)));
+            localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, cleanId), JSON.stringify(data.messages.slice(-1000)));
           } catch (_) {}
-          return merged;
-        });
+        }
       }
-    } catch (err) {
-      console.error('Error loading Neon bootstrap data:', err);
+    } catch (_) {
+      // Ignored
     }
-  }, []);
+  }, [effectiveIdentifier, googleUser?.name, urlNodeParam]);
 
-  const loadBootstrapData = useCallback(async () => {
-    await loadBootstrapDataForUser(effectiveIdentifier);
-  }, [effectiveIdentifier, loadBootstrapDataForUser]);
-
+  // Initial load
   useEffect(() => {
-    if (googleUser?.email) {
-      loadBootstrapDataForUser(googleUser.email);
-    } else {
-      loadBootstrapData();
-    }
-  }, [googleUser?.email, loadBootstrapData, loadBootstrapDataForUser]);
+    loadBootstrapData();
+  }, [loadBootstrapData]);
 
   // Handle User authentication
   const handleUserAuthenticated = (user: GoogleUserProfile) => {
@@ -400,19 +316,7 @@ export default function App() {
     const emailDomain = cleanDomain(user.email);
     setMyDomain(emailDomain);
     localStorage.setItem(STORAGE_KEYS.DOMAIN, emailDomain);
-
-    try {
-      const cachedPeers = localStorage.getItem(getUserStorageKey(STORAGE_KEYS.PEERS, emailDomain));
-      if (cachedPeers) {
-        setPeers(JSON.parse(cachedPeers));
-      }
-      const cachedMsgs = localStorage.getItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, emailDomain));
-      if (cachedMsgs) {
-        setMessages(JSON.parse(cachedMsgs));
-      }
-    } catch (_) {}
-
-    loadBootstrapDataForUser(emailDomain);
+    loadBootstrapData();
   };
 
   const handleSignOut = () => {
@@ -424,26 +328,7 @@ export default function App() {
     setActiveTarget({ id: 'general', type: 'channel', name: 'general' });
   };
 
-  // Fetch registered users for friend discovery
-  const fetchRegisteredUsers = async () => {
-    try {
-      const res = await fetch('/api/users');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.users)) {
-          setDiscoveredUsers(data.users.filter((u: any) => cleanDomain(u.email) !== cleanDomain(effectiveIdentifier)));
-        }
-      }
-    } catch (_) {}
-  };
-
-  useEffect(() => {
-    if (showAddPeerModal) {
-      fetchRegisteredUsers();
-    }
-  }, [showAddPeerModal, effectiveIdentifier]);
-
-  // Persist State to LocalStorage
+  // Persist State to LocalStorage (debounced/clean)
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.DOMAIN, myDomain);
@@ -456,154 +341,50 @@ export default function App() {
   }, [myDomain, myUsername, myAvatarColor, channels, peers, messages, effectiveIdentifier]);
 
   // =========================================================================
-  // REAL-TIME SERVER-SENT EVENTS (SSE) STREAM LISTENER
+  // CLEVER WEB CRAWLER METHOD: ON-DEMAND CRAWL & SYNC (Zero browser hang, zero SSE)
   // =========================================================================
-  useEffect(() => {
-    const clientId = `client_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const eventSource = new EventSource(
-      `/api/chat/stream?clientId=${clientId}&userIdentifier=${encodeURIComponent(effectiveIdentifier)}`
-    );
-
-    eventSource.onmessage = (e) => {
-      try {
-        const { type, payload } = JSON.parse(e.data);
-        if (!payload) return;
-
-        if (type === 'peer_request_received') {
-          // Check if request is intended for us
-          const ownerClean = cleanDomain(payload.ownerDomain || '');
-          const myClean = cleanDomain(effectiveIdentifier);
-
-          if (!ownerClean || ownerClean === myClean) {
-            const fromDomain = cleanDomain(payload.domain);
-            if (fromDomain === myClean) return;
-
-            setPeers((prev) => {
-              const existingIdx = prev.findIndex((p) => cleanDomain(p.domain) === fromDomain);
-              const newPeer: PeerIdentity = {
-                domain: fromDomain,
-                username: payload.username || fromDomain.split('@')[0],
-                avatarColor: payload.avatarColor || 'purple',
-                inboxUrl: payload.inboxUrl || `https://${fromDomain}/api/p2p/inbox`,
-                status: 'pending',
-                direction: 'incoming',
-                addedAt: payload.addedAt || Date.now(),
-                lastSeen: Date.now(),
-              };
-
-              let updated: PeerIdentity[];
-              if (existingIdx !== -1) {
-                if (prev[existingIdx].status === 'accepted') return prev;
-                const copy = [...prev];
-                copy[existingIdx] = { ...copy[existingIdx], ...newPeer };
-                updated = copy;
-              } else {
-                updated = [...prev, newPeer];
-              }
-              try {
-                localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-              } catch (_) {}
-              return updated;
-            });
-            playChime();
-          }
-        } else if (type === 'peer_updated') {
-          const targetClean = cleanDomain(payload.domain);
-          const ownerClean = cleanDomain(payload.ownerDomain || '');
-          const myClean = cleanDomain(effectiveIdentifier);
-
-          if (!ownerClean || ownerClean === myClean) {
-            setPeers((prev) => {
-              const updated = prev.map((p) => {
-                if (cleanDomain(p.domain) === targetClean) {
-                  return {
-                    ...p,
-                    status: payload.status,
-                    direction: payload.direction || p.direction,
-                    username: payload.username || p.username,
-                    avatarColor: payload.avatarColor || p.avatarColor,
-                    lastSeen: payload.lastSeen || Date.now(),
-                  };
-                }
-                return p;
-              });
-              try {
-                localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-              } catch (_) {}
-              return updated;
-            });
-            if (payload.status === 'accepted') {
-              playChime();
-            }
-          }
-        } else if (type === 'peer_deleted') {
-          const targetClean = cleanDomain(payload.domain);
-          const ownerClean = cleanDomain(payload.ownerDomain || '');
-          const myClean = cleanDomain(effectiveIdentifier);
-
-          // Only process deletion if targeted at this user
-          if (ownerClean && ownerClean !== myClean) return;
-
-          setPeers((prev) => {
-            const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
-            try {
-              localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-            } catch (_) {}
-            return updated;
-          });
+  const handleCrawlSync = async () => {
+    if (isSyncingCrawler) return;
+    setIsSyncingCrawler(true);
+    try {
+      const syncRes = await crawlerPingSender.crawlSync(effectiveIdentifier, activeTarget.id);
+      if (syncRes.success) {
+        if (Array.isArray(syncRes.peers) && syncRes.peers.length > 0) {
+          setPeers(syncRes.peers);
+        }
+        if (Array.isArray(syncRes.messages) && syncRes.messages.length > 0) {
+          // Merge messages without duplicates
           setMessages((prev) => {
-            const updated = prev.filter(
-              (m) =>
-                cleanDomain(m.targetId) !== targetClean &&
-                cleanDomain(m.senderDomain || '') !== targetClean &&
-                cleanDomain(m.senderId || '') !== targetClean
-            );
-            try {
-              localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, effectiveIdentifier), JSON.stringify(updated));
-            } catch (_) {}
-            return updated;
-          });
-        } else if (type === 'message_new') {
-          const msg = payload as ChatMessage;
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === msg.id)) return prev;
-            return [...prev, msg];
-          });
-
-          const current = activeTargetRef.current;
-          const isViewingThisChat =
-            current.id === msg.targetId ||
-            (msg.targetType === 'p2p' &&
-              (cleanDomain(current.id) === cleanDomain(msg.senderDomain || msg.senderId) ||
-                cleanDomain(current.domain || '') === cleanDomain(msg.senderDomain || msg.senderId)));
-
-          if (!isViewingThisChat) {
-            const badgeKey =
-              msg.targetType === 'channel' ? msg.targetId : msg.senderDomain || msg.senderId;
-            setUnreadMap((prev) => ({
-              ...prev,
-              [badgeKey]: (prev[badgeKey] || 0) + 1,
-            }));
-          }
-          playChime();
-        } else if (type === 'channel_new') {
-          const newChan = payload as ChatChannel;
-          setChannels((prev) => {
-            if (prev.some((c) => c.id === newChan.id)) return prev;
-            return [...prev, newChan];
+            const map = new Map<string, ChatMessage>();
+            for (const m of prev) if (m.id) map.set(m.id, m);
+            for (const m of syncRes.messages!) if (m.id) map.set(m.id, m);
+            return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
           });
         }
-      } catch (_) {}
-    };
+      }
+    } catch (_) {
+      // Ignored
+    } finally {
+      setIsSyncingCrawler(false);
+    }
+  };
 
+  // Sync on window focus (instant refresh when switching tabs without any interval loop)
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleCrawlSync();
+      }
+    };
+    window.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onVisibilityChange);
     return () => {
-      eventSource.close();
+      window.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onVisibilityChange);
     };
-  }, [effectiveIdentifier, myDomain]);
+  }, [effectiveIdentifier, activeTarget.id]);
 
-  // =========================================================================
-  // LIVE CRAWLER PING SENDER ACTION (Pure HTTP / Webhook & Database)
-  // =========================================================================
+  // Send Live Crawler Test Ping
   const handleSendTestPing = async () => {
     if (!activeTarget.domain && !activeTarget.id) return;
     const target = activeTarget.domain || activeTarget.id;
@@ -622,7 +403,7 @@ export default function App() {
       });
 
       if (res.success) {
-        setPingTestResult(`Pong ${res.latencyMs || 25}ms ✓`);
+        setPingTestResult(`Pong ${res.latencyMs || 18}ms ✓`);
       } else {
         setPingTestResult('Ping Failed');
       }
@@ -633,21 +414,6 @@ export default function App() {
       setTimeout(() => setPingTestResult(null), 3000);
     }
   };
-
-  // Periodic background sync: syncs peers & messages from Neon DB every 15s or on window focus
-  useEffect(() => {
-    const onFocus = () => {
-      loadBootstrapData();
-    };
-    window.addEventListener('focus', onFocus);
-    const interval = setInterval(() => {
-      loadBootstrapData();
-    }, 15000);
-    return () => {
-      window.removeEventListener('focus', onFocus);
-      clearInterval(interval);
-    };
-  }, [loadBootstrapData]);
 
   // Filter messages for current active target
   const currentMessages = messages.filter((m) => {
@@ -683,16 +449,29 @@ export default function App() {
     });
     setReplyingTo(null);
     setIsMobileNavOpen(false);
+
+    // Run quick crawler sync for the newly selected target
+    crawlerPingSender.crawlSync(effectiveIdentifier, target.id).then((res) => {
+      if (res.success && Array.isArray(res.messages) && res.messages.length > 0) {
+        setMessages((prev) => {
+          const map = new Map<string, ChatMessage>();
+          for (const m of prev) if (m.id) map.set(m.id, m);
+          for (const m of res.messages!) if (m.id) map.set(m.id, m);
+          return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
+        });
+      }
+    });
   };
 
-  // SEND FRIEND REQUEST ACTION (Dual-sided Database persistence + Web Crawler Ping)
+  // SEND FRIEND REQUEST ACTION (Crawler Ping + Database Save)
   const handleProbeAndAddPeer = async (e?: React.FormEvent, directTarget?: string) => {
     if (e) e.preventDefault();
     const target = directTarget || peerInputDomain;
     if (!target.trim()) return;
 
     setIsProbingPeer(true);
-    const targetClean = cleanDomain(target);
+    const resolvedTarget = resolveTargetHost(target, myDomain);
+    const targetClean = cleanDomain(resolvedTarget || target);
     const senderClean = cleanDomain(effectiveIdentifier);
 
     if (targetClean === senderClean) {
@@ -703,10 +482,9 @@ export default function App() {
 
     setPeerProbeStatus(`Dispatching crawler ping to ${targetClean}...`);
 
-    const peerUsername = targetClean.split('@')[0].split('.')[0];
+    const peerUsername = deriveSubdomain(targetClean);
     const peerAvatar = 'purple';
 
-    // 1. Crawler Ping Sender (Persists to database & delivers via hybrid webhook)
     try {
       const pingRes = await crawlerPingSender.sendPing({
         action: 'friend_request',
@@ -739,19 +517,15 @@ export default function App() {
       direction: 'outgoing',
       addedAt: Date.now(),
       lastSeen: Date.now(),
-      crawlerTags: [`#${peerUsername}`, `tag:${targetClean.split('@')[0]}`, 'crawler-ping:active'],
+      crawlerTags: [`#${peerUsername}`, `@${targetClean}`, 'crawler-ping:active'],
     };
 
     setPeers((prev) => {
       const filtered = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
-      const updated = [...filtered, newPeerObj];
-      try {
-        localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-      } catch (_) {}
-      return updated;
+      return [...filtered, newPeerObj];
     });
 
-    setPeerProbeStatus(`Crawler Ping delivered & saved to database! Waiting for approval.`);
+    setPeerProbeStatus(`✓ Dispatched via Web Crawler Ping & Saved to Database!`);
 
     setTimeout(() => {
       setShowAddPeerModal(false);
@@ -774,22 +548,10 @@ export default function App() {
         status: 'accepted',
         lastSeen: Date.now(),
       };
-      setPeers((prev) => {
-        const updated = prev.map((p) => (cleanDomain(p.domain) === targetClean ? updatedPeer : p));
-        try {
-          localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-        } catch (_) {}
-        return updated;
-      });
+      setPeers((prev) => prev.map((p) => (cleanDomain(p.domain) === targetClean ? updatedPeer : p)));
+      playChime();
     } else {
-      // Declined: remove from peers list
-      setPeers((prev) => {
-        const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
-        try {
-          localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-        } catch (_) {}
-        return updated;
-      });
+      setPeers((prev) => prev.filter((p) => cleanDomain(p.domain) !== targetClean));
     }
 
     // Update Database and notify via Crawler Ping
@@ -802,45 +564,25 @@ export default function App() {
         targetIdentifier: targetClean,
       });
     } catch (_) {}
-
-    if (accept) {
-      handleSelectChat({
-        id: targetClean,
-        type: 'p2p',
-        name: peer.username || targetClean,
-        domain: targetClean,
-      });
-    }
   };
 
-  // DELETE / CANCEL PEER
+  // DELETE PEER
   const handleDeletePeer = async (peerDomain: string) => {
     const targetClean = cleanDomain(peerDomain);
-    setPeers((prev) => {
-      const updated = prev.filter((p) => cleanDomain(p.domain) !== targetClean);
-      try {
-        localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(updated));
-      } catch (_) {}
-      return updated;
-    });
-
-    setMessages((prev) => {
-      const updated = prev.filter(
+    setPeers((prev) => prev.filter((p) => cleanDomain(p.domain) !== targetClean));
+    setMessages((prev) =>
+      prev.filter(
         (m) =>
           cleanDomain(m.targetId) !== targetClean &&
           cleanDomain(m.senderDomain || '') !== targetClean &&
           cleanDomain(m.senderId || '') !== targetClean
-      );
-      try {
-        localStorage.setItem(getUserStorageKey(STORAGE_KEYS.MESSAGES, effectiveIdentifier), JSON.stringify(updated));
-      } catch (_) {}
-      return updated;
-    });
+      )
+    );
 
     try {
       await fetch(
         `/api/peer/${encodeURIComponent(targetClean)}?ownerDomain=${encodeURIComponent(effectiveIdentifier)}`,
-        { method: 'DELETE', headers: getApiHeaders() }
+        { method: 'DELETE' }
       );
     } catch (_) {}
 
@@ -888,7 +630,7 @@ export default function App() {
     setImagePreview(null);
     setReplyingTo(null);
 
-    // 1. Deliver & Persist via Crawler Ping + Database
+    // Deliver & Persist via Crawler Ping + Database
     if (activeTarget.type === 'p2p') {
       try {
         await crawlerPingSender.sendPing({
@@ -912,7 +654,7 @@ export default function App() {
       try {
         await fetch('/api/chat/message', {
           method: 'POST',
-          headers: getApiHeaders({ 'Content-Type': 'application/json' }),
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             targetId: activeTarget.id,
             targetType: activeTarget.type,
@@ -984,20 +726,20 @@ export default function App() {
 
     const clean = cleanDomain(editDomain);
     setMyDomain(clean);
-    setMyUsername(editUsername.trim() || clean.split('.')[0]);
+    setMyUsername(editUsername.trim() || deriveSubdomain(clean));
     setMyAvatarColor(editColor);
 
     localStorage.setItem(STORAGE_KEYS.DOMAIN, clean);
-    localStorage.setItem(STORAGE_KEYS.USERNAME, editUsername.trim() || clean.split('.')[0]);
+    localStorage.setItem(STORAGE_KEYS.USERNAME, editUsername.trim() || deriveSubdomain(clean));
     localStorage.setItem(STORAGE_KEYS.AVATAR, editColor);
 
     setShowNodeConfigModal(false);
   };
 
-  // Copy Node Link
+  // Copy Node Link / Identity
   const handleCopyLink = () => {
-    const link = `https://${effectiveIdentifier}`;
-    navigator.clipboard.writeText(link);
+    const id = `#${myUsername} @${myDomain}`;
+    navigator.clipboard.writeText(id);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2000);
   };
@@ -1006,7 +748,7 @@ export default function App() {
   const outgoingRequests = peers.filter((p) => p.status === 'pending' && p.direction === 'outgoing');
   const acceptedPeers = peers.filter((p) => p.status === 'accepted');
 
-  // Mandatory Onboarding / Sign-In Gate: Ensure user is authenticated before chat
+  // Mandatory Onboarding Gate: If user is not yet logged in / authenticated
   if (!googleUser) {
     return (
       <>
@@ -1021,44 +763,40 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-black text-slate-100 font-sans select-none antialiased">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#090a0f] text-slate-100 font-sans select-none antialiased">
       {/* 1. SIDEBAR */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-[#1a1a1a] bg-[#09090b] transition-transform duration-200 ease-in-out md:static md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-slate-800/80 bg-[#0c0d14] transition-transform duration-200 ease-in-out md:static md:translate-x-0 ${
           isMobileNavOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        {/* Top Header & Google Auth */}
-        <div className="flex flex-col border-b border-[#1a1a1a] p-3.5 space-y-3 bg-[#0c0c0e]">
+        {/* Top Header & Identity Card */}
+        <div className="flex flex-col border-b border-slate-800/80 p-3.5 space-y-3 bg-[#0e1017]">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-600 to-indigo-500 shadow-md text-white font-bold">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 shadow-md text-white font-bold">
                 <Radio className="h-5 w-5" />
               </div>
               <div>
                 <div className="flex items-center space-x-1.5">
                   <h1 className="font-bold text-sm tracking-tight text-white">D-Connect</h1>
-                  <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-400 border border-indigo-800/40">
+                  <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-cyan-950/80 text-cyan-400 border border-cyan-800/40">
                     Crawler
                   </span>
                 </div>
-                <div className="flex items-center space-x-1.5 text-[11px] text-[#8e8e93]">
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      crawlerActive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                    }`}
-                  />
-                  <span className="truncate max-w-[130px] font-mono">{effectiveIdentifier}</span>
+                <div className="flex items-center space-x-1.5 text-[11px] text-slate-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="truncate max-w-[130px] font-mono">@{myDomain}</span>
                 </div>
               </div>
             </div>
 
             <div className="flex items-center space-x-1">
-              {/* Crawler Console / Activity Log */}
+              {/* Crawler Console Button */}
               <button
                 onClick={() => setShowCrawlerConsole(true)}
-                title="Crawler Ping Console"
-                className="p-1.5 rounded-lg bg-[#141417] border border-[#222226] text-indigo-400 hover:text-white transition cursor-pointer"
+                title="Crawler Log Console"
+                className="p-1.5 rounded-lg bg-[#141620] border border-slate-800 text-cyan-400 hover:text-white transition cursor-pointer"
               >
                 <Terminal className="h-4 w-4" />
               </button>
@@ -1070,7 +808,7 @@ export default function App() {
                 className={`p-1.5 rounded-lg border transition cursor-pointer ${
                   neonConfigured
                     ? 'bg-emerald-950/60 border-emerald-800/60 text-emerald-400'
-                    : 'bg-[#141417] border-[#222226] text-[#8e8e93] hover:text-white'
+                    : 'bg-[#141620] border-slate-800 text-slate-400 hover:text-white'
                 }`}
               >
                 <Database className="h-4 w-4" />
@@ -1085,21 +823,21 @@ export default function App() {
                   setShowNodeConfigModal(true);
                 }}
                 title="Node Settings"
-                className="p-1.5 rounded-lg bg-[#141417] border border-[#222226] text-[#8e8e93] hover:text-white transition cursor-pointer"
+                className="p-1.5 rounded-lg bg-[#141620] border border-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
               >
                 <Settings className="h-4 w-4" />
               </button>
 
               <button
                 onClick={() => setIsMobileNavOpen(false)}
-                className="p-1.5 rounded-lg text-[#8e8e93] hover:text-white md:hidden cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white md:hidden cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
           </div>
 
-          {/* Google Sign In Component & Identity */}
+          {/* User Profile Card */}
           <div className="w-full">
             <GoogleAuthButton
               currentUser={googleUser}
@@ -1108,43 +846,36 @@ export default function App() {
             />
           </div>
 
-          {/* Username Scene with Mini Crawler Discovery Tags */}
-          <div className="flex flex-col p-2.5 rounded-xl bg-[#141417] border border-[#222226] text-xs space-y-1.5">
+          {/* Auto-Assigned Identity & Mini Tags */}
+          <div className="flex flex-col p-2.5 rounded-2xl bg-[#131622] border border-slate-800/80 text-xs space-y-1.5">
             <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2 truncate">
-                <span className="text-[10px] font-bold text-[#aeaeb2] uppercase tracking-wider">
-                  Node User:
+              <div className="flex items-center space-x-1.5 truncate">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  Node Handle:
                 </span>
-                <span className="font-mono text-indigo-300 font-bold truncate">
-                  {myUsername}
-                </span>
-                <span className="text-[9px] px-1 py-0.5 rounded bg-indigo-950/80 text-indigo-400 font-mono border border-indigo-800/40">
-                  Subdomain
+                <span className="font-mono text-cyan-300 font-bold truncate">
+                  #{myUsername}
                 </span>
               </div>
               <button
                 onClick={handleCopyLink}
-                title="Copy crawler identifier"
-                className="text-[#8e8e93] hover:text-white transition cursor-pointer shrink-0"
+                title="Copy crawler identity"
+                className="text-slate-400 hover:text-white transition cursor-pointer shrink-0"
               >
                 {copiedLink ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
               </button>
             </div>
 
-            <div className="text-[10px] font-mono text-[#8e8e93] truncate">
-              Domain: <span className="text-slate-300">{myDomain}</span>
-            </div>
-
-            {/* Mini Discovery Tags for Crawler Connection */}
-            <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-[#222226]">
+            {/* Discovery Tags */}
+            <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-slate-800/80">
               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-indigo-950/70 text-indigo-300 border border-indigo-800/40">
-                &lt;tag: #{myUsername.toLowerCase().replace(/[^a-z0-9_-]/g, '')} /&gt;
+                #{myUsername.toLowerCase().replace(/[^a-z0-9_-]/g, '')}
               </span>
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-[#18181b] text-cyan-400 border border-cyan-900/50">
-                &lt;node: @{myDomain.toLowerCase().replace(/:\d+$/, '')} /&gt;
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-cyan-950/70 text-cyan-300 border border-cyan-800/40">
+                @{myDomain.toLowerCase().replace(/:\d+$/, '')}
               </span>
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-[#18181b] text-emerald-400 border border-emerald-900/50">
-                &lt;ping: ready /&gt;
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-950/70 text-emerald-300 border border-emerald-800/40">
+                crawler:active
               </span>
             </div>
           </div>
@@ -1155,13 +886,13 @@ export default function App() {
           {/* Action: Connect Peer */}
           <button
             onClick={() => setShowAddPeerModal(true)}
-            className="w-full flex items-center justify-center space-x-2 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow-sm cursor-pointer"
+            className="w-full flex items-center justify-center space-x-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white text-xs font-bold transition shadow-sm cursor-pointer"
           >
             <UserPlus className="h-4 w-4" />
-            <span>Connect Peer / Add Friend</span>
+            <span>Connect Friend via Subdomain</span>
           </button>
 
-          {/* INCOMING FRIEND REQUESTS (Action Required!) */}
+          {/* INCOMING FRIEND REQUESTS */}
           {incomingRequests.length > 0 && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between px-2 text-[11px] font-bold tracking-wider uppercase text-amber-400">
@@ -1174,19 +905,17 @@ export default function App() {
                 {incomingRequests.map((peer) => (
                   <div
                     key={peer.domain}
-                    className="p-2.5 rounded-xl bg-[#141417] border border-amber-500/40 shadow-sm space-y-2"
+                    className="p-2.5 rounded-xl bg-[#141622] border border-amber-500/40 shadow-sm space-y-2"
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2 min-w-0">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-950 text-amber-300 font-bold text-xs shrink-0">
-                          {peer.username.slice(0, 2).toUpperCase()}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-white truncate">{peer.username}</p>
-                          <p className="text-[10px] font-mono text-[#8e8e93] truncate">
-                            {peer.domain}
-                          </p>
-                        </div>
+                    <div className="flex items-center space-x-2 min-w-0">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-950 text-amber-300 font-bold text-xs shrink-0">
+                        {peer.username.slice(0, 2).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-white truncate">{peer.username}</p>
+                        <p className="text-[10px] font-mono text-slate-400 truncate">
+                          @{peer.domain}
+                        </p>
                       </div>
                     </div>
 
@@ -1196,11 +925,11 @@ export default function App() {
                         className="flex-1 flex items-center justify-center space-x-1 py-1 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer"
                       >
                         <Check className="h-3.5 w-3.5" />
-                        <span>Accept & Connect</span>
+                        <span>Accept</span>
                       </button>
                       <button
                         onClick={() => handleRespondFriendRequest(peer.domain, false)}
-                        className="p-1 px-2 rounded-lg bg-[#222226] hover:bg-rose-950 hover:text-rose-400 text-[#8e8e93] text-xs transition cursor-pointer"
+                        className="p-1 px-2 rounded-lg bg-slate-800 hover:bg-rose-950 hover:text-rose-400 text-slate-400 text-xs transition cursor-pointer"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
@@ -1214,21 +943,21 @@ export default function App() {
           {/* OUTGOING PENDING REQUESTS */}
           {outgoingRequests.length > 0 && (
             <div className="space-y-1">
-              <div className="px-2 text-[11px] font-bold tracking-wider uppercase text-[#8e8e93]">
+              <div className="px-2 text-[11px] font-bold tracking-wider uppercase text-slate-400">
                 Sent Requests ({outgoingRequests.length})
               </div>
               {outgoingRequests.map((peer) => (
                 <div
                   key={peer.domain}
-                  className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-[#141417] border border-[#222226] text-xs"
+                  className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-[#131622] border border-slate-800/80 text-xs"
                 >
                   <div className="flex items-center space-x-2 min-w-0">
                     <Clock className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                    <span className="text-white font-medium truncate">{peer.username}</span>
+                    <span className="text-white font-medium truncate">#{peer.username}</span>
                   </div>
                   <button
                     onClick={() => handleDeletePeer(peer.domain)}
-                    className="text-[#8e8e93] hover:text-rose-400 transition cursor-pointer"
+                    className="text-slate-400 hover:text-rose-400 transition cursor-pointer"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -1239,13 +968,13 @@ export default function App() {
 
           {/* CONNECTED PEERS / FRIENDS */}
           <div className="space-y-1">
-            <div className="flex items-center justify-between px-2 text-[11px] font-bold tracking-wider uppercase text-[#8e8e93]">
+            <div className="flex items-center justify-between px-2 text-[11px] font-bold tracking-wider uppercase text-slate-400">
               <span>Connected Friends ({acceptedPeers.length})</span>
             </div>
 
             {acceptedPeers.length === 0 ? (
-              <div className="p-3 text-center rounded-xl bg-[#141417]/50 border border-[#222226]/50 text-xs text-[#636366]">
-                No connected peers yet. Click <strong>Connect Peer</strong> above to add friends!
+              <div className="p-3 text-center rounded-2xl bg-[#131622]/60 border border-slate-800/60 text-xs text-slate-500">
+                No connected friends yet. Click <strong>Connect Friend</strong> above to add friends!
               </div>
             ) : (
               acceptedPeers.map((peer) => {
@@ -1264,42 +993,29 @@ export default function App() {
                     }
                     className={`group flex items-center justify-between px-2.5 py-2 rounded-xl text-xs transition cursor-pointer ${
                       isActive
-                        ? 'bg-indigo-600 text-white font-semibold shadow-xs'
-                        : 'text-[#aeaeb2] hover:bg-[#141417] hover:text-white'
+                        ? 'bg-gradient-to-r from-indigo-600 to-cyan-600 text-white font-semibold shadow-md'
+                        : 'text-slate-300 hover:bg-[#131622] hover:text-white'
                     }`}
                   >
                     <div className="flex items-center space-x-2.5 min-w-0">
                       <div
                         className={`flex h-7 w-7 items-center justify-center rounded-lg text-xs font-bold ${
-                          isActive ? 'bg-indigo-700 text-white' : 'bg-[#222226] text-indigo-400'
+                          isActive ? 'bg-black/30 text-white' : 'bg-slate-800 text-cyan-400'
                         }`}
                       >
                         {peer.username.slice(0, 2).toUpperCase()}
                       </div>
                       <div className="min-w-0">
-                        <p className="font-semibold text-white truncate">{peer.username}</p>
-                        <div className="flex items-center space-x-1 mt-0.5">
-                          <span
-                            className={`text-[9px] font-mono px-1 rounded truncate ${
-                              isActive ? 'bg-indigo-700/60 text-indigo-200' : 'bg-indigo-950/50 text-indigo-300'
-                            }`}
-                          >
-                            &lt;#{peer.username.toLowerCase().replace(/[^a-z0-9]/g, '')}&gt;
-                          </span>
-                          <span
-                            className={`text-[9px] font-mono truncate ${
-                              isActive ? 'text-indigo-200' : 'text-[#636366]'
-                            }`}
-                          >
-                            @{peer.domain}
-                          </span>
-                        </div>
+                        <p className="font-semibold text-white truncate">#{peer.username}</p>
+                        <p className={`text-[10px] font-mono truncate ${isActive ? 'text-cyan-100' : 'text-slate-500'}`}>
+                          @{peer.domain}
+                        </p>
                       </div>
                     </div>
 
                     <div className="flex items-center space-x-1">
                       {unread > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500 text-white">
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500 text-black">
                           {unread}
                         </span>
                       )}
@@ -1308,7 +1024,7 @@ export default function App() {
                           e.stopPropagation();
                           handleDeletePeer(peer.domain);
                         }}
-                        className="opacity-0 group-hover:opacity-100 p-1 rounded text-[#8e8e93] hover:text-rose-400 transition cursor-pointer"
+                        className="opacity-0 group-hover:opacity-100 p-1 rounded text-slate-400 hover:text-rose-400 transition cursor-pointer"
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
@@ -1321,14 +1037,14 @@ export default function App() {
 
           {/* CHANNELS */}
           <div className="space-y-1">
-            <div className="flex items-center justify-between px-2 text-[11px] font-bold tracking-wider uppercase text-[#8e8e93]">
+            <div className="flex items-center justify-between px-2 text-[11px] font-bold tracking-wider uppercase text-slate-400">
               <span>Channels</span>
               <button
                 onClick={() => setShowNewChannelModal(true)}
-                className="text-[#8e8e93] hover:text-white transition cursor-pointer"
+                className="text-slate-400 hover:text-white transition cursor-pointer"
                 title="Create channel"
               >
-                <Plus className="h-3.5 w-3.5" />
+                <PlusIcon className="h-3.5 w-3.5" />
               </button>
             </div>
 
@@ -1347,16 +1063,16 @@ export default function App() {
                   }
                   className={`w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-xs transition cursor-pointer ${
                     isActive
-                      ? 'bg-indigo-600 text-white font-semibold shadow-xs'
-                      : 'text-[#aeaeb2] hover:bg-[#141417] hover:text-white'
+                      ? 'bg-gradient-to-r from-indigo-600 to-cyan-600 text-white font-semibold shadow-md'
+                      : 'text-slate-300 hover:bg-[#131622] hover:text-white'
                   }`}
                 >
                   <div className="flex items-center space-x-2 truncate">
-                    <Hash className="h-3.5 w-3.5 shrink-0" />
+                    <Hash className="h-3.5 w-3.5 shrink-0 text-cyan-400" />
                     <span className="truncate">{chan.name}</span>
                   </div>
                   {unread > 0 && (
-                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500 text-white">
+                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500 text-black">
                       {unread}
                     </span>
                   )}
@@ -1367,20 +1083,20 @@ export default function App() {
         </div>
 
         {/* Sidebar Footer */}
-        <div className="p-3 border-t border-[#1a1a1a] bg-[#0c0c0e] space-y-2">
+        <div className="p-3 border-t border-slate-800/80 bg-[#0e1017] space-y-2">
           <PWAInstallButton />
 
-          <div className="flex items-center justify-between text-[11px] text-[#8e8e93] px-1">
+          <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
             <button
               onClick={() => setShowHowItWorksModal(true)}
-              className="hover:text-indigo-400 flex items-center space-x-1 cursor-pointer"
+              className="hover:text-cyan-400 flex items-center space-x-1 cursor-pointer transition"
             >
               <Sparkles className="h-3.5 w-3.5" />
               <span>How it works</span>
             </button>
             <button
               onClick={() => setShowCapacitorModal(true)}
-              className="hover:text-indigo-400 flex items-center space-x-1 cursor-pointer"
+              className="hover:text-cyan-400 flex items-center space-x-1 cursor-pointer transition"
             >
               <Smartphone className="h-3.5 w-3.5" />
               <span>Android APK</span>
@@ -1390,13 +1106,13 @@ export default function App() {
       </aside>
 
       {/* 2. MAIN CHAT AREA */}
-      <main className="flex flex-1 flex-col h-full min-w-0 overflow-hidden bg-black">
+      <main className="flex flex-1 flex-col h-full min-w-0 overflow-hidden bg-[#090a0f]">
         {/* Chat Top Header */}
-        <header className="flex h-16 shrink-0 items-center justify-between border-b px-4 border-[#1a1a1a] bg-[#0c0c0e] z-10">
+        <header className="flex h-16 shrink-0 items-center justify-between border-b px-4 border-slate-800/80 bg-[#0c0d14] z-10">
           <div className="flex items-center space-x-3 min-w-0">
             <button
               onClick={() => setIsMobileNavOpen(true)}
-              className="p-1.5 rounded-lg text-[#8e8e93] hover:text-white md:hidden cursor-pointer"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white md:hidden cursor-pointer"
               aria-label="Open sidebar"
             >
               <Menu className="h-5 w-5" />
@@ -1404,23 +1120,23 @@ export default function App() {
 
             <div className="flex items-center space-x-2.5 min-w-0">
               {activeTarget.type === 'channel' ? (
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#141417] text-indigo-400 font-bold shrink-0">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#131622] text-cyan-400 font-bold shrink-0">
                   <Hash className="h-5 w-5" />
                 </div>
               ) : (
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white font-bold shrink-0 text-sm">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 text-white font-bold shrink-0 text-sm">
                   {activeTarget.name.slice(0, 2).toUpperCase()}
                 </div>
               )}
               <div className="min-w-0">
                 <div className="flex items-center space-x-2">
                   <h2 className="text-base font-bold text-white truncate leading-tight">
-                    {activeTarget.type === 'channel' ? `#${activeTarget.name}` : activeTarget.name}
+                    {activeTarget.type === 'channel' ? `#${activeTarget.name}` : `#${activeTarget.name}`}
                   </h2>
                   {activeTarget.type === 'p2p' ? (
                     <div className="flex items-center space-x-1.5">
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-950/70 text-indigo-300 border border-indigo-800/40">
-                        &lt;tag: #{activeTarget.name.toLowerCase().replace(/[^a-z0-9]/g, '')}&gt;
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-cyan-950/70 text-cyan-300 border border-cyan-800/40">
+                        @{activeTarget.domain}
                       </span>
                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
                         Crawler Ping
@@ -1432,23 +1148,40 @@ export default function App() {
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-[#8e8e93] truncate">
+                <p className="text-xs text-slate-400 truncate">
                   {activeTarget.type === 'channel'
                     ? channels.find((c) => c.id === activeTarget.id)?.description || 'Global broadcast channel'
-                    : `Discovered via crawler tags: ${activeTarget.domain}`}
+                    : `Discovered node: ${activeTarget.domain}`}
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Quick Header Actions */}
+          {/* Quick Header Actions: Crawler Radar & Sync */}
           <div className="flex items-center space-x-2">
+            {/* ON-DEMAND CRAWLER SYNC BUTTON (Zero lag, pure DB saves!) */}
+            <button
+              onClick={handleCrawlSync}
+              disabled={isSyncingCrawler}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition cursor-pointer ${
+                isSyncingCrawler
+                  ? 'bg-cyan-950/80 border-cyan-500 text-cyan-300'
+                  : 'bg-[#131622] hover:bg-[#1a1d2d] border-slate-800 text-cyan-400'
+              }`}
+              title="Crawl & Sync updates from database"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isSyncingCrawler ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">
+                {isSyncingCrawler ? 'Crawling...' : 'Crawl & Sync'}
+              </span>
+            </button>
+
             {/* Live Crawler Test Ping Button */}
             {activeTarget.type === 'p2p' && (
               <button
                 onClick={handleSendTestPing}
                 disabled={isSendingPingTest}
-                className="hidden sm:flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-950/60 border border-indigo-800/60 text-indigo-300 font-mono text-xs hover:bg-indigo-900/60 transition cursor-pointer"
+                className="hidden sm:flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-indigo-950/60 border border-indigo-800/60 text-indigo-300 font-mono text-xs hover:bg-indigo-900/60 transition cursor-pointer"
                 title="Send a live crawler ping"
               >
                 <Activity className={`h-3.5 w-3.5 text-indigo-400 ${isSendingPingTest ? 'animate-spin' : ''}`} />
@@ -1456,36 +1189,19 @@ export default function App() {
               </button>
             )}
 
-            {/* User Account Info Chip */}
-            <div className="hidden lg:flex items-center space-x-2 px-2.5 py-1 rounded-xl bg-[#141417] border border-[#222226] text-xs">
-              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="font-medium text-white truncate max-w-[150px]">
-                {googleUser?.email || effectiveIdentifier}
-              </span>
-            </div>
-
-            <button
-              onClick={() => setShowAddPeerModal(true)}
-              className="hidden sm:flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-[#141417] border border-[#222226] text-indigo-400 font-semibold text-xs hover:bg-[#222226] transition cursor-pointer"
-            >
-              <UserPlus className="h-3.5 w-3.5" />
-              <span>Connect Peer</span>
-            </button>
             <button
               onClick={() => {
                 if (confirm('Clear chat history for this view?')) {
                   setMessages((prev) => prev.filter((m) => m.targetId !== activeTarget.id));
-                  try {
-                    fetch('/api/chat/clear', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ targetId: activeTarget.id }),
-                    }).catch(() => {});
-                  } catch (_) {}
+                  fetch('/api/chat/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ targetId: activeTarget.id }),
+                  }).catch(() => {});
                 }
               }}
               title="Clear conversation"
-              className="p-2 rounded-lg text-[#8e8e93] hover:text-rose-400 hover:bg-[#141417] transition cursor-pointer"
+              className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-[#131622] transition cursor-pointer"
             >
               <Trash2 className="h-4 w-4" />
             </button>
@@ -1493,77 +1209,32 @@ export default function App() {
             {/* Sign Out Button */}
             <button
               onClick={handleSignOut}
-              title="Sign out / Switch account"
-              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-[#141417] border border-[#222226] text-[#8e8e93] hover:text-rose-400 hover:border-rose-900/50 transition cursor-pointer text-xs"
+              title="Sign out / Switch node"
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-[#131622] border border-slate-800 text-slate-400 hover:text-rose-400 transition cursor-pointer text-xs"
             >
               <LogOut className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline font-medium">Sign Out</span>
+              <span className="hidden sm:inline font-medium">Exit</span>
             </button>
           </div>
         </header>
 
-        {/* Neon PostgreSQL Cloud Sync Status Banner */}
-        {!neonConfigured ? (
-          <div className="flex items-center justify-between px-4 py-2 bg-amber-950/40 border-b border-amber-800/40 text-xs text-amber-200">
-            <div className="flex items-center space-x-2">
-              <Database className="h-4 w-4 text-amber-400 shrink-0" />
-              <span>
-                <strong>Cross-Device Cloud Sync:</strong>{' '}
-                {dbStatusInfo?.detectedEnvKeys && dbStatusInfo.detectedEnvKeys.length > 0 ? (
-                  <span>
-                    Detected Vercel env (<strong>{dbStatusInfo.detectedEnvKeys.slice(0, 2).join(', ')}</strong>).{' '}
-                    {dbStatusInfo?.message && dbStatusInfo.message.includes('Error')
-                      ? dbStatusInfo.message
-                      : 'Connecting to database...'}
-                  </span>
-                ) : (
-                  'Neon Database is not connected yet. Connect Neon DB to sync friends & messages across Mobile & PC!'
-                )}
-              </span>
-            </div>
-            <button
-              onClick={() => setShowNeonModal(true)}
-              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-black font-bold text-[11px] rounded-lg transition shrink-0 cursor-pointer ml-2"
-            >
-              Configure Neon DB
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center justify-between px-4 py-1.5 bg-emerald-950/30 border-b border-emerald-900/30 text-[11px] text-emerald-300">
-            <div className="flex items-center space-x-2">
-              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>
-                <strong>Neon PostgreSQL Live:</strong> Cross-device sync is active. All friends and messages persist across mobile & PC.
-              </span>
-            </div>
-            <button
-              onClick={() => loadBootstrapData()}
-              className="flex items-center space-x-1 text-emerald-400 hover:text-white transition cursor-pointer"
-              title="Sync latest friends and messages"
-            >
-              <RefreshCw className="h-3 w-3" />
-              <span className="font-semibold">Sync</span>
-            </button>
-          </div>
-        )}
-
         {/* Message Feed */}
-        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-black">
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-[#090a0f]">
           {currentMessages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center p-6 space-y-3 text-[#636366]">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#141417] text-indigo-400 border border-[#222226]">
+            <div className="flex h-full flex-col items-center justify-center text-center p-6 space-y-3 text-slate-500">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#131622] text-cyan-400 border border-slate-800/80">
                 {activeTarget.type === 'channel' ? <Hash className="h-7 w-7" /> : <Globe className="h-7 w-7" />}
               </div>
               <div className="max-w-sm">
                 <p className="font-semibold text-white">
                   {activeTarget.type === 'channel'
                     ? `Welcome to #${activeTarget.name}`
-                    : `Connected directly to ${activeTarget.name}`}
+                    : `Connected directly to #${activeTarget.name}`}
                 </p>
-                <p className="text-xs mt-1 text-[#8e8e93]">
+                <p className="text-xs mt-1 text-slate-400">
                   {activeTarget.type === 'p2p'
-                    ? `Messages are saved in Neon PostgreSQL and delivered in real-time over WebRTC/SSE.`
-                    : 'Start the conversation by typing a message below.'}
+                    ? `All messages are delivered via HTTP Crawler Ping and persisted in the database.`
+                    : 'Start the conversation by sending a message below.'}
                 </p>
               </div>
             </div>
@@ -1592,37 +1263,37 @@ export default function App() {
                   </div>
 
                   <div className={`flex flex-col max-w-[85%] md:max-w-[70%] ${isMe ? 'items-end' : 'items-start'}`}>
-                    <div className="flex items-center space-x-1.5 px-1 pb-1 text-[11px] text-[#8e8e93]">
-                      <span className="font-semibold text-white">{msg.senderName}</span>
-                      <span className="font-mono text-[9px] text-indigo-400 bg-indigo-950/60 px-1 rounded">
-                        &lt;#{msg.senderName.toLowerCase().replace(/[^a-z0-9]/g, '')}&gt;
-                      </span>
+                    <div className="flex items-center space-x-1.5 px-1 pb-1 text-[11px] text-slate-400">
+                      <span className="font-semibold text-white">#{msg.senderName}</span>
                       {msg.senderDomain && (
-                        <span className="font-mono text-[10px] text-[#636366]">
+                        <span className="font-mono text-[10px] text-slate-500">
                           @{msg.senderDomain}
                         </span>
                       )}
                       <span>•</span>
                       <span>{timeString}</span>
+                      {msg.crawlerPingAck && (
+                        <span className="text-[9px] text-emerald-400 font-mono">✓ DB Saved</span>
+                      )}
                     </div>
 
                     <div
                       className={`relative px-3.5 py-2.5 rounded-2xl text-sm break-words transition shadow-xs ${
                         isMe
-                          ? 'bg-indigo-600 text-white rounded-tr-xs'
-                          : 'bg-[#141417] text-[#f2f2f7] border border-[#222226] rounded-tl-xs'
+                          ? 'bg-gradient-to-r from-indigo-600 to-cyan-600 text-white rounded-tr-xs'
+                          : 'bg-[#131622] text-slate-100 border border-slate-800/80 rounded-tl-xs'
                       }`}
                     >
                       {msg.replyTo && (
                         <div
                           className={`mb-2 px-2.5 py-1.5 rounded-lg text-xs border-l-2 ${
                             isMe
-                              ? 'bg-indigo-700/60 border-indigo-300 text-indigo-100'
-                              : 'bg-black border-indigo-500 text-[#aeaeb2]'
+                              ? 'bg-black/30 border-cyan-300 text-indigo-100'
+                              : 'bg-black/50 border-indigo-500 text-slate-300'
                           }`}
                         >
-                          <span className="font-bold block text-[10px] uppercase tracking-wider text-[#8e8e93]">
-                            Replying to {msg.replyTo.senderName}
+                          <span className="font-bold block text-[10px] uppercase tracking-wider text-slate-400">
+                            Replying to #{msg.replyTo.senderName}
                           </span>
                           <span className="line-clamp-1 italic text-[11px]">{msg.replyTo.text}</span>
                         </div>
@@ -1646,14 +1317,14 @@ export default function App() {
 
                   {/* Message hover actions */}
                   <div
-                    className={`opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-1 bg-[#141417] border border-[#222226] shadow-md rounded-xl p-1 z-10 ${
+                    className={`opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-1 bg-[#131622] border border-slate-800 shadow-md rounded-xl p-1 z-10 ${
                       isMe ? 'self-center mr-1' : 'self-center ml-1'
                     }`}
                   >
                     <button
                       onClick={() => setReplyingTo(msg)}
                       title="Reply"
-                      className="p-1 rounded text-[#8e8e93] hover:text-indigo-400 cursor-pointer"
+                      className="p-1 rounded text-slate-400 hover:text-cyan-400 cursor-pointer"
                     >
                       <Reply className="h-3.5 w-3.5" />
                     </button>
@@ -1663,8 +1334,8 @@ export default function App() {
                         setCopiedId(msg.id);
                         setTimeout(() => setCopiedId(null), 1500);
                       }}
-                      title="Copy"
-                      className="p-1 rounded text-[#8e8e93] hover:text-indigo-400 cursor-pointer"
+                      title="Copy text"
+                      className="p-1 rounded text-slate-400 hover:text-cyan-400 cursor-pointer"
                     >
                       {copiedId === msg.id ? (
                         <Check className="h-3.5 w-3.5 text-emerald-500" />
@@ -1672,17 +1343,6 @@ export default function App() {
                         <Copy className="h-3.5 w-3.5" />
                       )}
                     </button>
-                    {isMe && (
-                      <button
-                        onClick={() => {
-                          setMessages((prev) => prev.filter((m) => m.id !== msg.id));
-                        }}
-                        title="Delete"
-                        className="p-1 rounded text-[#8e8e93] hover:text-rose-400 cursor-pointer"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
                   </div>
                 </div>
               );
@@ -1691,19 +1351,19 @@ export default function App() {
         </div>
 
         {/* INPUT COMPOSER */}
-        <div className="p-3 border-t border-[#1a1a1a] bg-[#0c0c0e]">
+        <div className="p-3 border-t border-slate-800/80 bg-[#0c0d14]">
           {replyingTo && (
-            <div className="flex items-center justify-between px-3 py-1.5 mb-2 bg-[#141417] border border-[#222226] rounded-lg text-xs">
+            <div className="flex items-center justify-between px-3 py-1.5 mb-2 bg-[#131622] border border-slate-800 rounded-xl text-xs">
               <div className="flex items-center space-x-2 truncate">
-                <Reply className="h-3.5 w-3.5 text-indigo-400" />
+                <Reply className="h-3.5 w-3.5 text-cyan-400" />
                 <span className="font-semibold text-white">
-                  Replying to {replyingTo.senderName}:
+                  Replying to #{replyingTo.senderName}:
                 </span>
-                <span className="italic text-[#8e8e93] truncate">{replyingTo.text}</span>
+                <span className="italic text-slate-400 truncate">{replyingTo.text}</span>
               </div>
               <button
                 onClick={() => setReplyingTo(null)}
-                className="text-[#8e8e93] hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -1712,7 +1372,7 @@ export default function App() {
 
           {imagePreview && (
             <div className="relative inline-block mb-2">
-              <img src={imagePreview} alt="Preview" className="h-16 w-16 rounded-lg object-cover border border-[#222226]" />
+              <img src={imagePreview} alt="Preview" className="h-16 w-16 rounded-lg object-cover border border-slate-800" />
               <button
                 onClick={() => setImagePreview(null)}
                 className="absolute -top-1.5 -right-1.5 bg-rose-600 text-white rounded-full p-0.5 shadow cursor-pointer"
@@ -1733,7 +1393,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="p-2 text-[#8e8e93] hover:text-white rounded-lg hover:bg-[#141417] transition cursor-pointer"
+              className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-[#131622] transition cursor-pointer"
               title="Attach image"
             >
               <ImageIcon className="h-5 w-5" />
@@ -1742,17 +1402,17 @@ export default function App() {
             <div className="flex-1 relative flex items-center">
               <input
                 type="text"
-                placeholder={`Message ${activeTarget.type === 'channel' ? '#' + activeTarget.name : '@' + activeTarget.name}...`}
+                placeholder={`Message ${activeTarget.type === 'channel' ? '#' + activeTarget.name : '#' + activeTarget.name}...`}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                className="w-full px-4 py-2.5 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white placeholder-[#636366] focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition"
+                className="w-full px-4 py-2.5 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition"
               />
             </div>
 
             <button
               type="submit"
               disabled={(!inputText.trim() && !imagePreview) || isSending}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white font-semibold shadow-sm hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 text-white font-semibold shadow-md hover:from-indigo-500 hover:to-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
             >
               <Send className="h-4 w-4" />
             </button>
@@ -1761,50 +1421,50 @@ export default function App() {
       </main>
 
       {/* ============================================================ */}
-      {/* MODAL 1: Connect Remote Peer / Friend (Friend Request) */}
+      {/* MODAL 1: Connect Remote Peer / Friend via Subdomain */}
       {/* ============================================================ */}
       {showAddPeerModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-2xl bg-[#0c0c0e] border border-[#222226] p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-md rounded-3xl bg-[#0c0d14] border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-950 text-indigo-400">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-950 text-cyan-400">
                   <UserPlus className="h-4 w-4" />
                 </div>
-                <h3 className="font-bold text-base text-white">Connect Friend via Crawler Ping</h3>
+                <h3 className="font-bold text-base text-white">Connect Friend via Subdomain</h3>
               </div>
               <button
                 onClick={() => setShowAddPeerModal(false)}
-                className="text-[#8e8e93] hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <p className="text-xs text-[#8e8e93] leading-relaxed">
-              Enter the remote site's domain or subdomain (e.g.{' '}
-              <code className="px-1 py-0.5 rounded bg-[#141417] text-indigo-300 font-mono">
-                alice.railway.app
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Enter your friend's domain or subdomain (e.g.{' '}
+              <code className="px-1.5 py-0.5 rounded bg-[#131622] text-cyan-300 font-mono">
+                ais-pre-3adlco6h5rvvpf7asnanza-320046163787
               </code>{' '}
-              or <code className="px-1 py-0.5 rounded bg-[#141417] text-indigo-300 font-mono">node-2</code>).
-              The Web Crawler Ping sender crawls their dynamic discovery tags, persists the request into the database, and delivers it via hybrid webhook.
+              or full URL).
+              The backend crawler engine resolves the host, checks discovery tags, and delivers the friend request directly to their database.
             </p>
 
             <form onSubmit={(e) => handleProbeAndAddPeer(e)} className="space-y-3">
               <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
-                  Friend's Domain, Subdomain, or Tag:
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Friend's Subdomain or Domain:
                 </label>
                 <div className="flex items-center space-x-2">
                   <input
                     type="text"
-                    placeholder="e.g. alice.railway.app or node-2"
+                    placeholder="e.g. ais-pre-3adlco6h5rvvpf7asnanza-320046163787"
                     value={peerInputDomain}
                     onChange={(e) => {
                       setPeerInputDomain(e.target.value);
                       setDiscoveredTags([]);
                     }}
-                    className="flex-1 px-3 py-2 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white placeholder-[#636366] focus:outline-none focus:border-indigo-500 font-mono"
+                    className="flex-1 px-3 py-2 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white placeholder-slate-600 focus:outline-none focus:border-cyan-500 font-mono"
                     required
                     autoFocus
                   />
@@ -1812,31 +1472,33 @@ export default function App() {
                     type="button"
                     onClick={async () => {
                       if (!peerInputDomain.trim()) return;
-                      const res = await crawlerPingSender.probeTarget(peerInputDomain);
-                      setDiscoveredTags(res.tags);
+                      const res = await crawlerPingSender.probeTarget(peerInputDomain, myDomain);
+                      if (res.tags) {
+                        setDiscoveredTags(res.tags);
+                      }
                     }}
-                    className="px-3 py-2 rounded-xl text-xs font-semibold bg-[#141417] border border-[#222226] text-indigo-400 hover:text-white hover:bg-[#222226] transition cursor-pointer shrink-0"
+                    className="px-3 py-2 rounded-xl text-xs font-semibold bg-[#131622] border border-slate-800 text-cyan-400 hover:text-white transition cursor-pointer shrink-0"
                     title="Probe target crawler tags"
                   >
                     <Search className="h-3.5 w-3.5 inline mr-1" />
-                    <span>Scan Tags</span>
+                    <span>Scan</span>
                   </button>
                 </div>
               </div>
 
               {/* Crawler Mini Discovery Tags Preview */}
               {discoveredTags.length > 0 && (
-                <div className="p-2.5 rounded-xl bg-[#141417] border border-indigo-900/40 space-y-1.5">
-                  <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider block">
-                    Discovered Crawler Meta Tags:
+                <div className="p-2.5 rounded-2xl bg-[#131622] border border-cyan-900/40 space-y-1.5">
+                  <span className="text-[10px] font-bold text-cyan-300 uppercase tracking-wider block">
+                    Discovered Crawler Tags:
                   </span>
                   <div className="flex flex-wrap gap-1">
                     {discoveredTags.map((t, idx) => (
                       <span
                         key={idx}
-                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-800/40"
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800/40"
                       >
-                        &lt;{t.name}: {t.value} /&gt;
+                        {t.value}
                       </span>
                     ))}
                   </div>
@@ -1844,22 +1506,21 @@ export default function App() {
               )}
 
               <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
                   Greeting note (optional):
                 </label>
                 <input
                   type="text"
-                  placeholder="Hi, let's connect!"
+                  placeholder="e.g. Hey from another deployment!"
                   value={peerInputNote}
                   onChange={(e) => setPeerInputNote(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white placeholder-[#636366] focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white placeholder-slate-600 focus:outline-none focus:border-cyan-500"
                 />
               </div>
 
               {peerProbeStatus && (
-                <div className="p-2.5 rounded-lg bg-indigo-950/60 border border-indigo-800/60 text-xs text-indigo-300 flex items-center space-x-2">
-                  <div className="animate-spin h-3.5 w-3.5 border-2 border-indigo-500 border-t-transparent rounded-full shrink-0"></div>
-                  <span>{peerProbeStatus}</span>
+                <div className="p-2.5 rounded-xl bg-cyan-950/60 border border-cyan-800/60 text-xs text-cyan-200">
+                  {peerProbeStatus}
                 </div>
               )}
 
@@ -1867,149 +1528,77 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setShowAddPeerModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-[#8e8e93] hover:bg-[#141417] cursor-pointer"
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:bg-[#131622] cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isProbingPeer || !peerInputDomain.trim()}
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition cursor-pointer"
+                  disabled={isProbingPeer}
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white shadow-md cursor-pointer disabled:opacity-50"
                 >
-                  {isProbingPeer ? 'Sending Ping...' : 'Send Crawler Ping'}
+                  {isProbingPeer ? 'Crawling...' : 'Send Friend Request'}
                 </button>
               </div>
             </form>
-
-            {/* Quick 1-Click Connect Discovered Users on this Node */}
-            {discoveredUsers.length > 0 && (
-              <div className="pt-3 border-t border-[#222226] space-y-2">
-                <p className="text-[11px] font-bold text-[#aeaeb2] uppercase tracking-wider flex items-center space-x-1.5">
-                  <Users className="h-3.5 w-3.5 text-indigo-400" />
-                  <span>Discovered Users on this Database</span>
-                </p>
-                <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                  {discoveredUsers.map((u) => {
-                    const isAlreadyFriend = peers.some((p) => cleanDomain(p.domain) === cleanDomain(u.email));
-                    return (
-                      <div
-                        key={u.id || u.email}
-                        className="flex items-center justify-between p-2 rounded-xl bg-[#141417] border border-[#222226] text-xs"
-                      >
-                        <div className="flex items-center space-x-2 min-w-0">
-                          {u.picture ? (
-                            <img src={u.picture} alt="" className="h-6 w-6 rounded-full" />
-                          ) : (
-                            <div className="h-6 w-6 rounded-full bg-indigo-600 flex items-center justify-center font-bold text-[10px]">
-                              {u.name?.slice(0, 1) || 'U'}
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <p className="font-semibold text-white truncate">{u.name || u.email}</p>
-                            <p className="text-[10px] text-[#8e8e93] font-mono truncate">{u.email}</p>
-                          </div>
-                        </div>
-
-                        {isAlreadyFriend ? (
-                          <span className="text-[10px] font-semibold text-emerald-400">Connected</span>
-                        ) : (
-                          <button
-                            onClick={() => handleProbeAndAddPeer(undefined, u.email)}
-                            className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold cursor-pointer"
-                          >
-                            + Add
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </div>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* MODAL 2: Node Settings (Configure Custom Domain) */}
+      {/* MODAL 2: Node Settings Modal */}
       {/* ============================================================ */}
       {showNodeConfigModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-2xl bg-[#0c0c0e] border border-[#222226] p-6 shadow-2xl space-y-4">
+          <div className="w-full max-w-md rounded-3xl bg-[#0c0d14] border border-slate-800 p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Settings className="h-5 w-5 text-indigo-400" />
-                <h3 className="font-bold text-base text-white">Node & Domain Configuration</h3>
-              </div>
+              <h3 className="font-bold text-base text-white">Node Settings</h3>
               <button
                 onClick={() => setShowNodeConfigModal(false)}
-                className="text-[#8e8e93] hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <p className="text-xs text-[#8e8e93]">
-              Set your public domain so peers can address their friend requests and messages directly to you.
-            </p>
-
-            <form onSubmit={handleSaveNodeConfig} className="space-y-3">
+            <form onSubmit={handleSaveNodeConfig} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
-                  Public Domain / Subdomain:
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Node Domain / Host:
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. d-connect-2.vercel.app"
                   value={editDomain}
                   onChange={(e) => setEditDomain(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white focus:outline-none focus:border-indigo-500 font-mono"
+                  className="w-full px-3 py-2 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white focus:outline-none focus:border-cyan-500 font-mono"
                   required
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
-                  Your Display Handle:
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Node Handle:
                 </label>
                 <input
                   type="text"
                   value={editUsername}
                   onChange={(e) => setEditUsername(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white focus:outline-none focus:border-cyan-500 font-mono"
                   required
                 />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
-                  Avatar Color:
-                </label>
-                <div className="flex items-center space-x-2">
-                  {Object.keys(AVATAR_COLORS).map((c) => (
-                    <button
-                      type="button"
-                      key={c}
-                      onClick={() => setEditColor(c)}
-                      className={`h-7 w-7 rounded-full ${AVATAR_COLORS[c].bg} ${
-                        editColor === c ? 'ring-2 ring-offset-2 ring-indigo-500 ring-offset-black' : ''
-                      } cursor-pointer`}
-                    />
-                  ))}
-                </div>
               </div>
 
               <div className="flex justify-end space-x-2 pt-3">
                 <button
                   type="button"
                   onClick={() => setShowNodeConfigModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-[#8e8e93] hover:bg-[#141417] cursor-pointer"
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:bg-[#131622] cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 cursor-pointer"
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 text-white cursor-pointer"
                 >
                   Save Settings
                 </button>
@@ -2020,43 +1609,43 @@ export default function App() {
       )}
 
       {/* ============================================================ */}
-      {/* MODAL 3: How Crawler Ping & Webhook Federation Works */}
+      {/* MODAL 3: How Crawler Method Works */}
       {/* ============================================================ */}
       {showHowItWorksModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-lg rounded-2xl bg-[#0c0c0e] border border-[#222226] p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-lg rounded-3xl bg-[#0c0d14] border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <Sparkles className="h-5 w-5 text-indigo-400" />
-                <h3 className="font-bold text-base text-white">How Crawler Ping & Webhook Federation Works</h3>
+                <Sparkles className="h-5 w-5 text-cyan-400" />
+                <h3 className="font-bold text-base text-white">How Web Crawler Method Works</h3>
               </div>
               <button
                 onClick={() => setShowHowItWorksModal(false)}
-                className="text-[#8e8e93] hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="text-xs text-[#d1d1d6] space-y-3 leading-relaxed">
-              <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-1">
-                <p className="font-bold text-indigo-400">1. Neon Serverless PostgreSQL Database</p>
-                <p className="text-[#8e8e93]">
-                  Like a conventional web app, everything (user profiles, channels, messages, contact lists) is persisted directly in PostgreSQL. If the remote site is offline, messages and requests wait in the DB.
+            <div className="text-xs text-slate-300 space-y-3 leading-relaxed">
+              <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-1">
+                <p className="font-bold text-cyan-400">1. Auto-Assigned Subdomain Identity</p>
+                <p className="text-slate-400">
+                  Every site deployment automatically derives its username and node identity from its unique domain or subdomain (e.g. <code>#ais-dev-xxx</code> on <code>@asia-southeast1.run.app</code>). This guarantees zero conflicts across deployments.
                 </p>
               </div>
 
-              <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-1">
-                <p className="font-bold text-indigo-400">2. Web Crawler Ping & Mini Discovery Tags</p>
-                <p className="text-[#8e8e93]">
-                  Each user has mini crawler tags (e.g. <code>&lt;tag: #username&gt;</code>, <code>&lt;ping: active&gt;</code>). When adding friends or chatting, the crawler sends a ping and hybrid webhook to the destination endpoint, verifies the tags, and receives a signed pong response.
+              <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-1">
+                <p className="font-bold text-cyan-400">2. Real Server-to-Server Crawler Federation</p>
+                <p className="text-slate-400">
+                  When you add a friend or send a message, your node's backend crawler executes the HTTP ping to their endpoint. Browsers never make cross-origin requests, eliminating 100% of CORS and "Failed to fetch" errors.
                 </p>
               </div>
 
-              <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-1">
-                <p className="font-bold text-indigo-400">3. Zero Fragile P2P / WebRTC Dependencies</p>
-                <p className="text-[#8e8e93]">
-                  No STUN/TURN servers, no signaling server drops, and no browser-to-browser NAT traversal failures. Standard HTTP ping sender + Server-Sent Events guarantees 100% deliverability.
+              <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-1">
+                <p className="font-bold text-cyan-400">3. Zero Browser Hangs: No SSE or WebRTC</p>
+                <p className="text-slate-400">
+                  No leaky EventSource connections, no WebRTC signaling storms, and no background interval loops. Pure database saves keep all data safe with lightning-fast on-demand crawl synchronization.
                 </p>
               </div>
             </div>
@@ -2064,7 +1653,7 @@ export default function App() {
             <div className="flex justify-end pt-2">
               <button
                 onClick={() => setShowHowItWorksModal(false)}
-                className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 cursor-pointer"
+                className="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 text-white cursor-pointer"
               >
                 Got It
               </button>
@@ -2078,61 +1667,58 @@ export default function App() {
       {/* ============================================================ */}
       {showCrawlerConsole && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-2xl rounded-2xl bg-[#0c0c0e] border border-[#222226] p-6 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between border-b border-[#222226] pb-3">
+          <div className="w-full max-w-2xl rounded-3xl bg-[#0c0d14] border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center space-x-2.5">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-950 text-indigo-400">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-950 text-cyan-400">
                   <Terminal className="h-4 w-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-base text-white">Crawler Ping & Hybrid Webhook Console</h3>
-                  <p className="text-[11px] text-[#8e8e93]">
-                    Real-time inspector for crawler pings, discovery tags, and hybrid webhooks
+                  <h3 className="font-bold text-base text-white">Web Crawler Activity Console</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Real-time inspector for crawler pings and discovery tags
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setShowCrawlerConsole(false)}
-                className="text-[#8e8e93] hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            {/* Current Node Crawler Mini Tags */}
-            <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-2">
+            {/* Current Node Discovery Tags */}
+            <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-white">Active Discovery Meta Tags:</span>
                 <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded">
-                  crawler-ping/2.1 active
+                  crawler:active
                 </span>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {myCrawlerTags.map((tag, i) => (
                   <span
                     key={i}
-                    className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-950 text-indigo-300 border border-indigo-800/40"
+                    className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800/40"
                   >
-                    &lt;{tag} /&gt;
+                    {tag}
                   </span>
                 ))}
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-[#222226] text-slate-300">
-                  &lt;node: {effectiveIdentifier}&gt;
-                </span>
               </div>
             </div>
 
             {/* Live Logs Stream */}
             <div className="flex-1 overflow-y-auto space-y-2 min-h-[220px] font-mono text-[11px]">
               {crawlerLogs.length === 0 ? (
-                <div className="p-6 text-center text-[#636366] text-xs">
-                  No crawler pings dispatched yet. Send a friend request or message to see the crawler ping stream!
+                <div className="p-6 text-center text-slate-500 text-xs">
+                  No crawler pings dispatched yet. Send a friend request or message to see crawler activity!
                 </div>
               ) : (
                 crawlerLogs.map((log) => (
                   <div
                     key={log.id}
-                    className="p-2.5 rounded-xl bg-[#141417] border border-[#222226] space-y-1"
+                    className="p-2.5 rounded-xl bg-[#131622] border border-slate-800 space-y-1"
                   >
                     <div className="flex items-center justify-between text-[10px]">
                       <span className="flex items-center space-x-1.5">
@@ -2142,43 +1728,30 @@ export default function App() {
                               ? 'bg-emerald-400'
                               : log.status === 'failed'
                               ? 'bg-rose-500'
-                              : 'bg-indigo-400 animate-pulse'
+                              : 'bg-cyan-400 animate-pulse'
                           }`}
                         />
                         <span className="font-bold text-white uppercase">{log.type.replace('_', ' ')}</span>
-                        <span className="text-[#8e8e93]">→ {log.target}</span>
+                        <span className="text-slate-400">→ {log.target}</span>
                       </span>
-                      <span className="text-[#636366]">
+                      <span className="text-slate-500">
                         {new Date(log.timestamp).toLocaleTimeString()}
                       </span>
                     </div>
 
-                    <p className="text-xs text-[#aeaeb2] font-sans">{log.details}</p>
-
-                    {log.tags && log.tags.length > 0 && (
-                      <div className="flex flex-wrap gap-1 pt-0.5">
-                        {log.tags.map((t, idx) => (
-                          <span
-                            key={idx}
-                            className="text-[9px] px-1.5 py-0.2 rounded bg-black text-indigo-400 border border-[#222226]"
-                          >
-                            #{t}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <p className="text-xs text-slate-300 font-sans">{log.details}</p>
                   </div>
                 ))
               )}
             </div>
 
-            <div className="flex items-center justify-between pt-2 border-t border-[#222226]">
-              <span className="text-[11px] text-[#8e8e93]">
+            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+              <span className="text-[11px] text-slate-400">
                 Total Events: {crawlerLogs.length}
               </span>
               <button
                 onClick={() => setShowCrawlerConsole(false)}
-                className="px-4 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 cursor-pointer"
+                className="px-4 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 text-white cursor-pointer"
               >
                 Close
               </button>
@@ -2188,35 +1761,35 @@ export default function App() {
       )}
 
       {/* ============================================================ */}
-      {/* MODAL 4: Android APK / Capacitor Guide */}
+      {/* MODAL 4: Android APK Guide */}
       {/* ============================================================ */}
       {showCapacitorModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-lg rounded-2xl bg-[#0c0c0e] border border-[#222226] p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-lg rounded-3xl bg-[#0c0d14] border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <Smartphone className="h-5 w-5 text-indigo-400" />
+                <Smartphone className="h-5 w-5 text-cyan-400" />
                 <h3 className="font-bold text-base text-white">Generate Native Android APK</h3>
               </div>
               <button
                 onClick={() => setShowCapacitorModal(false)}
-                className="text-[#8e8e93] hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="text-xs text-[#d1d1d6] space-y-3 leading-relaxed">
-              <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-1 font-mono text-[11px]">
-                <p className="font-bold text-indigo-400 font-sans">Step 1: Install Capacitor</p>
-                <p className="bg-black p-2 rounded text-[#a1a1aa]">
+            <div className="text-xs text-slate-300 space-y-3 leading-relaxed">
+              <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-1 font-mono text-[11px]">
+                <p className="font-bold text-cyan-400 font-sans">Step 1: Install Capacitor</p>
+                <p className="bg-black/60 p-2 rounded text-slate-300">
                   npm install @capacitor/core @capacitor/cli @capacitor/android
                 </p>
               </div>
 
-              <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-1 font-mono text-[11px]">
-                <p className="font-bold text-indigo-400 font-sans">Step 2: Add Android Project</p>
-                <p className="bg-black p-2 rounded text-[#a1a1aa]">
+              <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-1 font-mono text-[11px]">
+                <p className="font-bold text-cyan-400 font-sans">Step 2: Add Android Project</p>
+                <p className="bg-black/60 p-2 rounded text-slate-300">
                   npx cap init "D-Connect" "com.dconnect.app" --web-dir="dist"
                   <br />
                   npm run build
@@ -2225,13 +1798,10 @@ export default function App() {
                 </p>
               </div>
 
-              <div className="p-3 rounded-xl bg-[#141417] border border-[#222226] space-y-1 font-mono text-[11px]">
-                <p className="font-bold text-indigo-400 font-sans">Step 3: Build APK</p>
-                <p className="bg-black p-2 rounded text-[#a1a1aa]">
+              <div className="p-3 rounded-2xl bg-[#131622] border border-slate-800 space-y-1 font-mono text-[11px]">
+                <p className="font-bold text-cyan-400 font-sans">Step 3: Build APK</p>
+                <p className="bg-black/60 p-2 rounded text-slate-300">
                   npx cap open android
-                </p>
-                <p className="font-sans text-[11px] text-[#8e8e93] mt-1">
-                  In Android Studio, click <strong>Build &gt; Build Bundle(s) / APK(s) &gt; Build APK(s)</strong>.
                 </p>
               </div>
             </div>
@@ -2239,7 +1809,7 @@ export default function App() {
             <div className="flex justify-end pt-2">
               <button
                 onClick={() => setShowCapacitorModal(false)}
-                className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 cursor-pointer"
+                className="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 text-white cursor-pointer"
               >
                 Close Guide
               </button>
@@ -2253,24 +1823,24 @@ export default function App() {
       {/* ============================================================ */}
       {showNewChannelModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-sm rounded-2xl bg-[#0c0c0e] border border-[#222226] p-6 shadow-2xl space-y-4">
+          <div className="w-full max-w-sm rounded-3xl bg-[#0c0d14] border border-slate-800 p-6 shadow-2xl space-y-4">
             <h3 className="font-bold text-base text-white">Create Channel</h3>
             <form onSubmit={handleCreateChannel} className="space-y-3">
               <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
                   Channel Name
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. general"
+                  placeholder="e.g. announcements"
                   value={newChannelName}
                   onChange={(e) => setNewChannelName(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white focus:outline-none focus:border-cyan-500"
                   required
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-[#aeaeb2] mb-1">
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
                   Description
                 </label>
                 <input
@@ -2278,20 +1848,20 @@ export default function App() {
                   placeholder="Channel description"
                   value={newChannelDesc}
                   onChange={(e) => setNewChannelDesc(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-xl border border-[#222226] bg-[#141417] text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 text-sm rounded-xl border border-slate-800 bg-[#131622] text-white focus:outline-none focus:border-cyan-500"
                 />
               </div>
               <div className="flex justify-end space-x-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowNewChannelModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-[#8e8e93] hover:bg-[#141417] cursor-pointer"
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:bg-[#131622] cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 cursor-pointer"
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-cyan-600 text-white cursor-pointer"
                 >
                   Create
                 </button>
@@ -2301,7 +1871,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Neon Database Status & Vercel Integration Modal */}
+      {/* Neon Database Modal */}
       <NeonDbModal
         isOpen={showNeonModal}
         onClose={() => setShowNeonModal(false)}
@@ -2313,5 +1883,22 @@ export default function App() {
         }}
       />
     </div>
+  );
+}
+
+function PlusIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      {...props}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
   );
 }

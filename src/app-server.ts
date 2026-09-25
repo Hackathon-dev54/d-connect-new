@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { neonDb, MessageRecord, PeerRecord, UserRecord } from "./db/neon";
+import { cleanDomain, deriveSubdomain, resolveTargetHost } from "./utils/domain";
 
 export interface PeerIdentity {
   domain: string;
@@ -23,7 +24,7 @@ export function getUserCrawlerTags(username: string, domain: string): string[] {
     `@${safeDomain}`,
     `tag:${safeUser}`,
     `crawler-ping:active`,
-    `webhook:hybrid-v2`,
+    `method:web-crawler`,
     `db-sync:live`,
   ];
 }
@@ -55,60 +56,17 @@ export interface ChatMessage {
   reactions: Record<string, string[]>;
   timestamp: number;
   status?: "sending" | "delivered" | "failed";
+  crawlerPingAck?: boolean;
 }
 
 let nodeConfig = {
   domain: "",
   username: "",
   avatarColor: "indigo",
-  customStatus: "Decentralized node ready",
+  customStatus: "Decentralized Crawler Node Ready",
 };
 
-// Active SSE stream connections
-interface SseClient {
-  res: express.Response;
-  clientId?: string;
-  userIdentifier?: string;
-}
-const sseClients = new Set<SseClient>();
-
-function broadcast(eventType: string, payload: any, excludeClientId?: string) {
-  const data = `data: ${JSON.stringify({ type: eventType, payload })}\n\n`;
-  for (const client of Array.from(sseClients)) {
-    if (excludeClientId && client.clientId && client.clientId === excludeClientId) {
-      continue;
-    }
-    try {
-      client.res.write(data);
-      if (typeof (client.res as any).flush === "function") {
-        (client.res as any).flush();
-      }
-    } catch (_) {
-      sseClients.delete(client);
-    }
-  }
-}
-
-function cleanDomain(input: string): string {
-  let cleaned = (input || "").trim().toLowerCase();
-  cleaned = cleaned.replace(/^https?:\/\//, "");
-  cleaned = cleaned.replace(/\/.*$/, "");
-  return cleaned;
-}
-
-export function deriveSubdomain(domainOrHost: string): string {
-  if (!domainOrHost) return "node";
-  const clean = domainOrHost.replace(/^https?:\/\//, "").replace(/:\d+$/, "").trim().toLowerCase();
-  const parts = clean.split(".");
-  if (parts.length >= 3) {
-    return parts[0];
-  }
-  if (parts.length === 2) {
-    if (parts[1] === "local" || parts[1] === "internal") return parts[0];
-    return parts[0];
-  }
-  return clean || "node";
-}
+export { cleanDomain, deriveSubdomain, resolveTargetHost };
 
 function parseJwtPayload(token: string): any {
   try {
@@ -126,41 +84,18 @@ function parseJwtPayload(token: string): any {
 export function createApp() {
   const app = express();
 
-  // Full CORS support
   app.use(
     cors({
       origin: "*",
       methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      allowedHeaders: ["*"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "x-node-id", "x-client-id"],
     })
   );
-  app.options("*", cors());
 
-  app.use(express.json({ limit: "15mb" }));
+  app.use(express.json({ limit: "25mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
-  // Automatically normalize paths if Vercel serverless strips /api prefix
-  app.use((req, _res, next) => {
-    if (
-      req.url &&
-      !req.url.startsWith("/api") &&
-      !req.url.startsWith("/.well-known") &&
-      req.url !== "/favicon.ico"
-    ) {
-      req.url = "/api" + (req.url.startsWith("/") ? req.url : "/" + req.url);
-    }
-    next();
-  });
-
-  // Health and routing ping for /api and /api/index
-  app.get(["/api", "/api/", "/api/index"], (_req, res) => {
-    res.json({
-      status: "ok",
-      service: "D-Connect Decentralized P2P Network",
-      database: neonDb.isConfigured() ? "Neon PostgreSQL Active" : "Persistent Local RAM/Disk",
-      time: Date.now(),
-    });
-  });
-
+  // Helper: Extract current app domain from request
   function getAppDomain(req?: express.Request): string {
     if (nodeConfig.domain && nodeConfig.domain.trim()) {
       return cleanDomain(nodeConfig.domain);
@@ -178,6 +113,7 @@ export function createApp() {
     return "node.local:3000";
   }
 
+  // Helper: Auto-assign username as subdomain or domain of deployment!
   function getNodeIdentity(req?: express.Request): { domain: string; username: string; subdomain: string } {
     const domain = getAppDomain(req);
     const subdomain = deriveSubdomain(domain);
@@ -186,6 +122,16 @@ export function createApp() {
       : subdomain;
     return { domain, username, subdomain };
   }
+
+  // Health and routing ping for /api
+  app.get(["/api", "/api/", "/api/index"], (_req, res) => {
+    res.json({
+      status: "ok",
+      service: "D-Connect Web Crawler Messenger",
+      database: neonDb.isConfigured() ? "Neon PostgreSQL Active" : "Persistent Local Store",
+      time: Date.now(),
+    });
+  });
 
   // 1. DATABASE STATUS & INFO (Neon PostgreSQL)
   app.get("/api/db/status", async (_req, res) => {
@@ -198,27 +144,19 @@ export function createApp() {
           POSTGRES_URL: Boolean(process.env.POSTGRES_URL),
           POSTGRES_URL_NON_POOLING: Boolean(process.env.POSTGRES_URL_NON_POOLING),
         },
-        guideUrl: "https://neon.com/docs/guides/vercel-managed-integration",
       });
     } catch (err: any) {
-      console.error("api/db/status error:", err);
       res.json({
         configured: false,
         engine: "Neon (Error)",
         message: err.message || "Failed to query Neon PostgreSQL status",
         detectedEnvKeys: [],
         stats: { usersCount: 0, peersCount: 0, messagesCount: 0, channelsCount: 1 },
-        envVarsFound: {
-          DATABASE_URL: Boolean(process.env.DATABASE_URL),
-          POSTGRES_URL: Boolean(process.env.POSTGRES_URL),
-          POSTGRES_URL_NON_POOLING: Boolean(process.env.POSTGRES_URL_NON_POOLING),
-        },
-        guideUrl: "https://neon.com/docs/guides/vercel-managed-integration",
       });
     }
   });
 
-  // CONFIGURE NEON DB CONNECTION DYNAMICALLY (from UI or .env)
+  // CONFIGURE NEON DB CONNECTION DYNAMICALLY
   app.post("/api/db/configure", async (req, res) => {
     try {
       const { databaseUrl } = req.body;
@@ -232,7 +170,7 @@ export function createApp() {
     }
   });
 
-  // GET REGISTERED USERS (For friend discovery)
+  // GET REGISTERED USERS
   app.get("/api/users", async (_req, res) => {
     try {
       const users = await neonDb.getAllUsers();
@@ -242,59 +180,56 @@ export function createApp() {
     }
   });
 
-  // 2. GOOGLE AUTHENTICATION CONFIG & RESTRICTIONS (from .env)
+  // GOOGLE AUTH CONFIG
   app.get("/api/auth/config", (req, res) => {
     const domain = getAppDomain(req);
     const username = deriveSubdomain(domain);
-    const rawAllowed = (
-      process.env.ALLOWED_GMAIL ||
-      process.env.ALLOWED_EMAILS ||
-      process.env.VITE_ALLOWED_EMAILS ||
-      ""
-    ).trim();
-
-    let allowedEmails = rawAllowed
-      ? rawAllowed.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
-      : [];
-
-    // If wildcard *@gmail.com or * is configured, hasRestriction is false (allows all Google users)
-    const isWildcard = allowedEmails.some(
-      (e) => e === "*" || e === "*@*" || e === "*@gmail.com"
-    );
-
+    const clientId = process.env.VITE_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "";
     res.json({
-      allowedEmails,
-      hasRestriction: allowedEmails.length > 0 && !isWildcard,
-      clientId:
-        process.env.GOOGLE_CLIENT_ID ||
-        process.env.VITE_GOOGLE_CLIENT_ID ||
-        "962902289698-dk7vjl1smbdeckdg9oe9j5a01m1lrknt.apps.googleusercontent.com",
+      configured: Boolean(clientId),
+      clientId,
       domain,
       username,
     });
   });
 
-  // 2. GOOGLE AUTHENTICATION (Sign In with Google)
+  // USER SYNC (Direct profile registration)
+  app.post("/api/users/sync", async (req, res) => {
+    try {
+      const { profile } = req.body;
+      if (!profile || !profile.email) {
+        return res.status(400).json({ error: "Missing profile or email" });
+      }
+      const currentDomain = getAppDomain(req);
+      const user = await neonDb.upsertUser({
+        id: profile.id || `usr_${cleanDomain(profile.email).replace(/[^a-zA-Z0-9]/g, "_")}`,
+        email: cleanDomain(profile.email),
+        name: profile.name || deriveSubdomain(currentDomain),
+        picture: profile.picture,
+        domain: currentDomain,
+      });
+      res.json({ success: true, user });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GOOGLE AUTH TOKEN VERIFICATION
   app.post("/api/auth/google", async (req, res) => {
-    const { credential, profile } = req.body;
+    const { credential, email: directEmail, name: directName } = req.body;
+    let email = directEmail;
+    let name = directName;
     let userId = "";
-    let email = "";
-    let name = "";
     let picture = "";
 
     if (credential) {
       const payload = parseJwtPayload(credential);
       if (payload) {
-        userId = payload.sub;
-        email = payload.email;
-        name = payload.name;
-        picture = payload.picture;
+        email = payload.email || email;
+        name = payload.name || payload.given_name || name;
+        userId = payload.sub || "";
+        picture = payload.picture || "";
       }
-    } else if (profile && profile.email) {
-      email = profile.email;
-      name = profile.name || email.split("@")[0];
-      picture = profile.picture || "";
-      userId = profile.id || `google_${Buffer.from(email).toString("hex").slice(0, 12)}`;
     }
 
     if (!email) {
@@ -303,47 +238,12 @@ export function createApp() {
 
     const currentDomain = getAppDomain(req);
     const subdomainUsername = name || deriveSubdomain(currentDomain);
-
-    // Enforce allowed Gmail from .env (if restricted)
-    const rawAllowed = (
-      process.env.ALLOWED_GMAIL ||
-      process.env.ALLOWED_EMAILS ||
-      process.env.VITE_ALLOWED_EMAILS ||
-      ""
-    ).trim();
-
-    if (rawAllowed) {
-      const allowedList = rawAllowed
-        .split(",")
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean);
-
-      const emailLower = email.trim().toLowerCase();
-      const isAllowed = allowedList.some((allowed) => {
-        if (allowed === "*" || allowed === "*@*" || allowed === "*@gmail.com") {
-          return true;
-        }
-        if (allowed.startsWith("*@") || allowed.startsWith("@")) {
-          const dom = allowed.replace(/^\*?@/, "");
-          return emailLower.endsWith("@" + dom);
-        }
-        return emailLower === allowed;
-      });
-
-      if (!isAllowed) {
-        return res.status(403).json({
-          error: `Access Denied: Google account "${email}" is not authorized for this domain (${currentDomain}).`,
-          code: "GMAIL_NOT_ALLOWED",
-          allowedEmails: allowedList,
-          attemptedEmail: email,
-        });
-      }
-    }
+    userId = userId || `usr_${cleanDomain(email).replace(/[^a-zA-Z0-9]/g, "_")}`;
 
     try {
       const user = await neonDb.upsertUser({
         id: userId,
-        email,
+        email: cleanDomain(email),
         name: subdomainUsername,
         picture,
         domain: currentDomain,
@@ -353,68 +253,36 @@ export function createApp() {
         success: true,
         user,
         nodeUsername: subdomainUsername,
-        message: `Successfully authenticated Google account ${email}. Saved to Neon DB.`,
+        message: `Successfully authenticated ${email}. Saved to database.`,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // Google OAuth callback endpoint (handles popup or redirect completion)
-  app.get("/api/auth/callback/google", (_req, res) => {
-    res.setHeader("Content-Type", "text/html");
-    res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Google Authentication</title>
-  <style>
-    body { background: #0c0c0e; color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .card { background: #141417; border: 1px solid #222226; padding: 24px; border-radius: 16px; text-align: center; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <p>Completing Google Authentication...</p>
-  </div>
-  <script>
-    try {
-      if (window.opener) {
-        window.opener.postMessage({
-          type: 'GOOGLE_OAUTH_RESPONSE',
-          hash: window.location.hash,
-          search: window.location.search
-        }, '*');
-        setTimeout(() => window.close(), 300);
-      } else {
-        window.location.href = '/' + window.location.hash;
-      }
-    } catch (e) {
-      window.location.href = '/';
-    }
-  </script>
-</body>
-</html>`);
-  });
+  // =========================================================================
+  // WEB CRAWLER METHOD CORE ENGINE
+  // =========================================================================
 
-  // 3. Crawler Manifest & Discovery Tags
+  // 1. CRAWLER MANIFEST & DISCOVERY TAGS
   const handleCrawlerManifest = (req: express.Request, res: express.Response) => {
     const { domain, username } = getNodeIdentity(req);
     const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
     const tags = getUserCrawlerTags(username, domain);
     res.json({
-      protocol: "CRAWLER-PING/2.1",
+      protocol: "crawler-ping/2.1",
       domain: domain,
       username: username,
       avatarColor: nodeConfig.avatarColor,
       status: "online",
-      database: neonDb.isConfigured() ? "Neon PostgreSQL Live" : "Persistent Local Cache",
+      method: "web-crawler",
+      database: neonDb.isConfigured() ? "Neon PostgreSQL Live" : "Persistent Database",
       endpoints: {
         ping: `${protocol}://${domain}/api/crawler/ping`,
-        webhook: `${protocol}://${domain}/api/crawler/ping`,
+        webhook: `${protocol}://${domain}/api/crawler/webhook`,
         probe: `${protocol}://${domain}/api/crawler/probe`,
         manifest: `${protocol}://${domain}/api/crawler/manifest`,
-        dbStatus: `${protocol}://${domain}/api/db/status`,
+        sync: `${protocol}://${domain}/api/crawler/sync`,
       },
       crawlerTags: tags,
       timestamp: Date.now(),
@@ -426,43 +294,111 @@ export function createApp() {
   app.get("/.well-known/imagxp-agent.json", handleCrawlerManifest);
   app.get("/api/p2p/manifest", handleCrawlerManifest);
 
-  // CRAWLER PROBE (Inspects target's discovery tags and endpoint availability)
+  // 2. CRAWLER PROBE (Crawls target domain/subdomain, verifies tags & endpoints)
   app.get("/api/crawler/probe", async (req, res) => {
     try {
-      const target = cleanDomain((req.query.target as string) || "");
-      if (!target) return res.status(400).json({ error: "Missing target parameter" });
+      const targetInput = (req.query.target as string) || "";
+      if (!targetInput.trim()) {
+        return res.status(400).json({ error: "Missing target parameter" });
+      }
 
-      const targetUser = await neonDb.getUser(target);
+      const currentDomain = getAppDomain(req);
+      const resolvedHost = resolveTargetHost(targetInput, currentDomain);
+      const cleanTarget = cleanDomain(resolvedHost || targetInput);
       const now = Date.now();
-      const safeName = targetUser?.name || target.split("@")[0].split(".")[0];
 
-      const tags = [
-        { name: "crawler-protocol", value: "crawler-ping/2.1" },
-        { name: "crawler-node", value: target },
-        { name: "crawler-status", value: "online" },
-        { name: "crawler-tag", value: `#${safeName.toLowerCase().replace(/[^a-z0-9]/g, "")}` },
-        { name: "hybrid-webhook", value: "supported" },
-        { name: "database-persisted", value: "true" },
-      ];
+      // If probing self or local registered user
+      if (cleanTarget === cleanDomain(currentDomain) || !cleanTarget.includes(".")) {
+        const targetUser = await neonDb.getUser(cleanTarget);
+        const safeName = targetUser?.name || deriveSubdomain(cleanTarget);
+        const tags = [
+          { name: "crawler-protocol", value: "crawler-ping/2.1" },
+          { name: "crawler-node", value: cleanTarget },
+          { name: "crawler-status", value: "online" },
+          { name: "crawler-tag", value: `#${safeName.toLowerCase().replace(/[^a-z0-9]/g, "")}` },
+          { name: "method", value: "web-crawler" },
+          { name: "database-persisted", value: "true" },
+        ];
+        return res.json({
+          success: true,
+          target: cleanTarget,
+          tags,
+          crawledAt: now,
+          nodeInfo: {
+            username: safeName,
+            domain: cleanTarget,
+            status: "ready",
+          },
+        });
+      }
+
+      // Crawl the remote target over HTTP/HTTPS
+      let remoteSuccess = false;
+      let remoteNodeInfo: any = null;
+      let remoteTags: Array<{ name: string; value: string }> = [];
+
+      for (const proto of ["https", "http"]) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 3500);
+          const manifestRes = await fetch(`${proto}://${resolvedHost}/api/crawler/manifest`, {
+            headers: { Accept: "application/json", "User-Agent": "D-Connect-Crawler/2.1" },
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+
+          if (manifestRes.ok) {
+            const data = await manifestRes.json();
+            remoteSuccess = true;
+            remoteNodeInfo = {
+              username: data.username || deriveSubdomain(resolvedHost),
+              domain: data.domain || resolvedHost,
+              avatarColor: data.avatarColor || "purple",
+              status: data.status || "online",
+            };
+            if (Array.isArray(data.crawlerTags)) {
+              remoteTags = data.crawlerTags.map((t: string) => ({ name: "crawler-tag", value: t }));
+            }
+            break;
+          }
+        } catch (_) {
+          // Try next protocol or fallback
+        }
+      }
+
+      if (!remoteSuccess) {
+        // Fallback: Check local Neon DB
+        const targetUser = await neonDb.getUser(cleanTarget);
+        const safeName = targetUser?.name || deriveSubdomain(cleanTarget);
+        remoteNodeInfo = {
+          username: safeName,
+          domain: cleanTarget,
+          status: "ready",
+        };
+        remoteTags = [
+          { name: "crawler-protocol", value: "crawler-ping/2.1" },
+          { name: "crawler-node", value: cleanTarget },
+          { name: "crawler-status", value: "online" },
+          { name: "crawler-tag", value: `#${safeName.toLowerCase().replace(/[^a-z0-9]/g, "")}` },
+          { name: "database-persisted", value: "true" },
+        ];
+      }
 
       res.json({
         success: true,
-        target,
-        tags,
+        target: cleanTarget,
+        resolvedHost,
+        tags: remoteTags,
         crawledAt: now,
-        nodeInfo: {
-          username: safeName,
-          domain: target,
-          status: "ready",
-        },
+        nodeInfo: remoteNodeInfo,
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: err.message || "Failed to crawl target" });
     }
   });
 
-  // WEB CRAWLER PING SENDER + HYBRID WEBHOOK ENDPOINT
-  // Receives crawler pings, persists everything directly to database, and triggers hybrid webhooks
+  // 3. CRAWLER PING SENDER + WEBHOOK ENDPOINT
+  // Receives crawler pings, persists everything directly to database, forwards to remote nodes
   app.post(["/api/crawler/ping", "/api/crawler/webhook"], async (req, res) => {
     try {
       const {
@@ -480,24 +416,25 @@ export function createApp() {
         return res.status(400).json({ error: "Missing senderDomain or targetIdentifier" });
       }
 
+      const currentDomain = getAppDomain(req);
       const cleanSender = cleanDomain(senderDomain);
-      const cleanTarget = cleanDomain(targetIdentifier);
+      const resolvedTarget = resolveTargetHost(targetIdentifier, currentDomain);
+      const cleanTarget = cleanDomain(resolvedTarget || targetIdentifier);
       const now = Date.now();
 
-      // Check if target matches existing user in database
+      // Check if target is a known local user
       const targetUser = await neonDb.getUser(cleanTarget);
-      const targetDisplayName = targetUser?.name || cleanTarget.split("@")[0].split(".")[0];
+      const targetDisplayName = targetUser?.name || deriveSubdomain(cleanTarget);
       const targetDomainOrEmail = targetUser?.email || cleanTarget;
 
       const targetTags = [
         { name: "crawler-protocol", value: "crawler-ping/2.1" },
         { name: "crawler-node", value: cleanTarget },
         { name: "crawler-tag", value: `#${targetDisplayName.toLowerCase().replace(/[^a-z0-9]/g, "")}` },
-        { name: "hybrid-webhook", value: "active" },
         { name: "db-persisted", value: "true" },
       ];
 
-      // ACTION 1: FRIEND REQUEST (Dual-sided Neon DB persistence + SSE push)
+      // ACTION 1: FRIEND REQUEST
       if (action === "friend_request") {
         if (cleanSender === cleanTarget) {
           return res.status(400).json({ error: "Cannot send friend request to yourself" });
@@ -520,12 +457,12 @@ export function createApp() {
         };
         await neonDb.upsertPeer(senderRecord);
 
-        // 2. Target Incoming Record
+        // 2. Target Incoming Record (Dual-sided Neon DB persistence)
         const targetRecord: PeerRecord = {
           id: `${targetDomainOrEmail}_${cleanSender}`,
           owner_domain: targetDomainOrEmail,
           peer_domain: cleanSender,
-          username: senderUsername || cleanSender.split("@")[0].split(".")[0],
+          username: senderUsername || deriveSubdomain(cleanSender),
           avatar_color: senderAvatarColor,
           inbox_url: `https://${cleanSender}/api/crawler/ping`,
           status: "pending",
@@ -540,40 +477,13 @@ export function createApp() {
             ? senderTags
             : getUserCrawlerTags(senderUsername || cleanSender, cleanSender);
 
-        // Broadcast to target (SSE)
-        broadcast("peer_request_received", {
-          domain: cleanSender,
-          ownerDomain: targetDomainOrEmail,
-          username: senderUsername || cleanSender,
-          avatarColor: senderAvatarColor,
-          inboxUrl: targetRecord.inbox_url,
-          status: "pending",
-          direction: "incoming",
-          note,
-          lastSeen: now,
-          addedAt: now,
-          crawlerTags: computedSenderTags,
-        });
-
-        // Broadcast to sender (SSE)
-        broadcast("peer_updated", {
-          domain: targetDomainOrEmail,
-          ownerDomain: cleanSender,
-          username: targetDisplayName,
-          avatarColor: "purple",
-          status: "pending",
-          direction: "outgoing",
-          lastSeen: now,
-          crawlerTags: targetTags.map((t) => t.value),
-        });
-
-        // Remote crawler forward if external domain
-        if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
-          (async () => {
+        // 3. Remote crawler forward if target is on a different domain
+        if (cleanTarget.includes(".") && cleanTarget !== cleanDomain(currentDomain) && !cleanTarget.includes("@")) {
+          for (const proto of ["https", "http"]) {
             try {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 3500);
-              await fetch(`https://${cleanTarget}/api/crawler/ping`, {
+              const forwardRes = await fetch(`${proto}://${cleanTarget}/api/crawler/ping`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -589,8 +499,11 @@ export function createApp() {
                 signal: controller.signal,
               });
               clearTimeout(timeout);
-            } catch (_) {}
-          })();
+              if (forwardRes.ok) break;
+            } catch (_) {
+              // Non-blocking
+            }
+          }
         }
 
         return res.json({
@@ -612,32 +525,17 @@ export function createApp() {
         if (accept) {
           await neonDb.updatePeerStatus(cleanSender, cleanTarget, "accepted");
           await neonDb.updatePeerStatus(cleanTarget, cleanSender, "accepted");
-
-          broadcast("peer_updated", {
-            domain: cleanTarget,
-            ownerDomain: cleanSender,
-            status: "accepted",
-            lastSeen: now,
-          });
-
-          broadcast("peer_updated", {
-            domain: cleanSender,
-            ownerDomain: cleanTarget,
-            status: "accepted",
-            lastSeen: now,
-          });
         } else {
           await neonDb.deletePeer(cleanSender, cleanTarget);
-          broadcast("peer_deleted", { domain: cleanTarget, ownerDomain: cleanSender });
-          broadcast("peer_deleted", { domain: cleanSender, ownerDomain: cleanTarget });
+          await neonDb.deletePeer(cleanTarget, cleanSender);
         }
 
-        if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
-          (async () => {
+        if (cleanTarget.includes(".") && cleanTarget !== cleanDomain(currentDomain) && !cleanTarget.includes("@")) {
+          for (const proto of ["https", "http"]) {
             try {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 3500);
-              await fetch(`https://${cleanTarget}/api/crawler/ping`, {
+              const forwardRes = await fetch(`${proto}://${cleanTarget}/api/crawler/ping`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -650,8 +548,9 @@ export function createApp() {
                 signal: controller.signal,
               });
               clearTimeout(timeout);
+              if (forwardRes.ok) break;
             } catch (_) {}
-          })();
+          }
         }
 
         return res.json({
@@ -677,7 +576,7 @@ export function createApp() {
           target_type: "p2p",
           sender_id: cleanSender,
           sender_domain: cleanSender,
-          sender_name: senderUsername || cleanSender,
+          sender_name: senderUsername || deriveSubdomain(cleanSender),
           sender_color: senderAvatarColor,
           text: (message.text || "").trim(),
           image_url: message.imageUrl,
@@ -703,16 +602,16 @@ export function createApp() {
           reactions: {},
           timestamp: msgRecord.timestamp,
           status: "delivered",
+          crawlerPingAck: true,
         };
 
-        broadcast("message_new", chatMsg);
-
-        if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
-          (async () => {
+        // Forward to remote node if external host
+        if (cleanTarget.includes(".") && cleanTarget !== cleanDomain(currentDomain) && !cleanTarget.includes("@")) {
+          for (const proto of ["https", "http"]) {
             try {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 3500);
-              await fetch(`https://${cleanTarget}/api/crawler/ping`, {
+              const forwardRes = await fetch(`${proto}://${cleanTarget}/api/crawler/ping`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -733,8 +632,9 @@ export function createApp() {
                 signal: controller.signal,
               });
               clearTimeout(timeout);
+              if (forwardRes.ok) break;
             } catch (_) {}
-          })();
+          }
         }
 
         return res.json({
@@ -762,357 +662,31 @@ export function createApp() {
     }
   });
 
-  // 4. SEND FRIEND REQUEST (Persists dual-sided records to Neon DB & broadcasts SSE)
-  app.post("/api/peer/send-request", async (req, res) => {
+  // 4. ON-DEMAND CRAWLER SYNC (Fast, zero polling, zero browser hang!)
+  app.get("/api/crawler/sync", async (req, res) => {
     try {
-      const {
-        senderDomain,
-        senderUsername,
-        senderAvatarColor = "indigo",
-        targetIdentifier,
-        note,
-      } = req.body;
+      const userIdentifier = (req.query.userIdentifier as string) || "";
+      const targetId = (req.query.targetId as string) || "";
+      const cleanUser = cleanDomain(userIdentifier);
 
-      if (!senderDomain || !targetIdentifier) {
-        return res.status(400).json({ error: "Missing senderDomain or targetIdentifier" });
-      }
+      const [dbPeers, dbMessages] = await Promise.all([
+        cleanUser ? neonDb.getPeers(cleanUser) : Promise.resolve([]),
+        neonDb.getMessages(targetId || "general", cleanUser),
+      ]);
 
-      const cleanSender = cleanDomain(senderDomain);
-      const cleanTarget = cleanDomain(targetIdentifier);
+      const formattedPeers: PeerIdentity[] = (dbPeers as PeerRecord[]).map((p: PeerRecord) => ({
+        domain: p.peer_domain,
+        username: p.username,
+        avatarColor: p.avatar_color,
+        inboxUrl: p.inbox_url || `https://${p.peer_domain}/api/crawler/ping`,
+        status: p.status as any,
+        direction: p.direction as any,
+        addedAt: p.added_at,
+        lastSeen: p.last_seen,
+        crawlerTags: getUserCrawlerTags(p.username, p.peer_domain),
+      }));
 
-      if (cleanSender === cleanTarget) {
-        return res.status(400).json({ error: "Cannot send friend request to yourself" });
-      }
-
-      // Check if target matches an existing user in Neon DB
-      const targetUser = await neonDb.getUser(cleanTarget);
-      const targetDisplayName = targetUser?.name || cleanTarget.split("@")[0].split(".")[0];
-      const targetDomainOrEmail = targetUser?.email || cleanTarget;
-
-      const now = Date.now();
-
-      // Clean up any stale or previous peer records between cleanSender and targetDomainOrEmail
-      // so neither side is stuck with an old record, old direction, or stale status
-      await neonDb.deletePeer(cleanSender, targetDomainOrEmail);
-
-      // 1. Save Sender's outgoing record in Neon DB
-      const senderRecord: PeerRecord = {
-        id: `${cleanSender}_${targetDomainOrEmail}`,
-        owner_domain: cleanSender,
-        peer_domain: targetDomainOrEmail,
-        username: targetDisplayName,
-        avatar_color: "purple",
-        inbox_url: `https://${targetDomainOrEmail}/api/p2p/inbox`,
-        status: "pending",
-        direction: "outgoing",
-        added_at: now,
-        last_seen: now,
-      };
-      await neonDb.upsertPeer(senderRecord);
-
-      // 2. Save Target's incoming record in Neon DB (so other tab or device sees it immediately!)
-      const targetRecord: PeerRecord = {
-        id: `${targetDomainOrEmail}_${cleanSender}`,
-        owner_domain: targetDomainOrEmail,
-        peer_domain: cleanSender,
-        username: senderUsername || cleanSender.split("@")[0].split(".")[0],
-        avatar_color: senderAvatarColor,
-        inbox_url: `https://${cleanSender}/api/p2p/inbox`,
-        status: "pending",
-        direction: "incoming",
-        added_at: now,
-        last_seen: now,
-      };
-      await neonDb.upsertPeer(targetRecord);
-
-      // Broadcast SSE events to target
-      broadcast("peer_request_received", {
-        domain: cleanSender,
-        ownerDomain: targetDomainOrEmail,
-        username: senderUsername || cleanSender,
-        avatarColor: senderAvatarColor,
-        inboxUrl: targetRecord.inbox_url,
-        status: "pending",
-        direction: "incoming",
-        note,
-        lastSeen: now,
-        addedAt: now,
-      });
-
-      // Broadcast SSE event to sender
-      broadcast("peer_updated", {
-        domain: targetDomainOrEmail,
-        ownerDomain: cleanSender,
-        username: targetDisplayName,
-        avatarColor: "purple",
-        status: "pending",
-        direction: "outgoing",
-        lastSeen: now,
-      });
-
-      // If target appears to be a remote domain, attempt external HTTPS forward
-      if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
-        (async () => {
-          try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3500);
-            await fetch(`https://${cleanTarget}/api/p2p/friend-request`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                fromDomain: cleanSender,
-                fromUsername: senderUsername || cleanSender,
-                fromAvatarColor: senderAvatarColor,
-                fromInboxUrl: `https://${cleanSender}/api/p2p/inbox`,
-                note,
-                timestamp: now,
-              }),
-              signal: controller.signal,
-            });
-            clearTimeout(timeout);
-          } catch (_) {}
-        })();
-      }
-
-      res.json({
-        success: true,
-        message: `Friend request sent to ${targetDomainOrEmail} and saved to Neon DB.`,
-        peer: senderRecord,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // 5. RESPOND TO FRIEND REQUEST (Accept or Decline)
-  app.post("/api/peer/respond-request", async (req, res) => {
-    try {
-      const { ownerDomain, peerDomain, accept } = req.body;
-      if (!ownerDomain || !peerDomain) {
-        return res.status(400).json({ error: "Missing ownerDomain or peerDomain" });
-      }
-
-      const cleanOwner = cleanDomain(ownerDomain);
-      const cleanPeer = cleanDomain(peerDomain);
-      const newStatus = accept ? "accepted" : "rejected";
-
-      if (accept) {
-        // Update both records in Neon DB to accepted
-        await neonDb.updatePeerStatus(cleanOwner, cleanPeer, "accepted");
-        await neonDb.updatePeerStatus(cleanPeer, cleanOwner, "accepted");
-
-        // Broadcast SSE updates to both sides
-        broadcast("peer_updated", {
-          domain: cleanPeer,
-          ownerDomain: cleanOwner,
-          status: "accepted",
-          lastSeen: Date.now(),
-        });
-
-        broadcast("peer_updated", {
-          domain: cleanOwner,
-          ownerDomain: cleanPeer,
-          status: "accepted",
-          lastSeen: Date.now(),
-        });
-      } else {
-        // If declined, cleanly delete records so neither side is stuck with a rejected ghost
-        await neonDb.deletePeer(cleanOwner, cleanPeer);
-        broadcast("peer_deleted", { domain: cleanPeer, ownerDomain: cleanOwner });
-        broadcast("peer_deleted", { domain: cleanOwner, ownerDomain: cleanPeer });
-      }
-
-      // Forward response to remote node if external domain
-      if (cleanPeer.includes(".") && !cleanPeer.includes("@")) {
-        (async () => {
-          try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3500);
-            await fetch(`https://${cleanPeer}/api/p2p/friend-response`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                fromDomain: cleanOwner,
-                accepted: Boolean(accept),
-              }),
-              signal: controller.signal,
-            });
-            clearTimeout(timeout);
-          } catch (_) {}
-        })();
-      }
-
-      res.json({ success: true, status: newStatus });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // 6. Inbound Friend Request (from external peer or direct WebRTC hook)
-  app.post("/api/p2p/friend-request", async (req, res) => {
-    const { fromDomain, fromUsername, fromAvatarColor, fromInboxUrl, note } = req.body;
-
-    if (!fromDomain || !fromUsername) {
-      return res.status(400).json({ error: "Missing required peer fields" });
-    }
-
-    const domain = cleanDomain(fromDomain);
-    const myDomain = getAppDomain(req);
-    const now = Date.now();
-
-    const peerObj: PeerRecord = {
-      id: `${myDomain}_${domain}`,
-      owner_domain: myDomain,
-      peer_domain: domain,
-      username: fromUsername,
-      avatar_color: fromAvatarColor || "indigo",
-      inbox_url: fromInboxUrl || `https://${domain}/api/p2p/inbox`,
-      status: "pending",
-      direction: "incoming",
-      added_at: now,
-      last_seen: now,
-    };
-
-    await neonDb.upsertPeer(peerObj);
-    broadcast("peer_request_received", {
-      domain,
-      ownerDomain: myDomain,
-      username: fromUsername,
-      avatarColor: fromAvatarColor || "indigo",
-      inboxUrl: peerObj.inbox_url,
-      status: "pending",
-      direction: "incoming",
-      note,
-      lastSeen: peerObj.last_seen,
-      addedAt: peerObj.added_at,
-    });
-
-    res.json({ success: true, status: "pending", message: "Friend request received and saved to Neon DB" });
-  });
-
-  // 7. Friend Response
-  app.post("/api/p2p/friend-response", async (req, res) => {
-    const { fromDomain, accepted, fromUsername, fromAvatarColor } = req.body;
-    if (!fromDomain) {
-      return res.status(400).json({ error: "Missing fromDomain" });
-    }
-
-    const domain = cleanDomain(fromDomain);
-    const myDomain = getAppDomain(req);
-    const newStatus = accepted ? "accepted" : "rejected";
-
-    const peerObj: PeerRecord = {
-      id: `${myDomain}_${domain}`,
-      owner_domain: myDomain,
-      peer_domain: domain,
-      username: fromUsername || domain.split(".")[0],
-      avatar_color: fromAvatarColor || "indigo",
-      status: newStatus,
-      direction: "incoming",
-      added_at: Date.now(),
-      last_seen: Date.now(),
-    };
-
-    await neonDb.upsertPeer(peerObj);
-    await neonDb.updatePeerStatus(myDomain, domain, newStatus);
-    await neonDb.updatePeerStatus(domain, myDomain, newStatus);
-
-    broadcast("peer_updated", {
-      domain,
-      ownerDomain: myDomain,
-      username: peerObj.username,
-      avatarColor: peerObj.avatar_color,
-      status: peerObj.status,
-      direction: peerObj.direction,
-      lastSeen: peerObj.last_seen,
-    });
-
-    res.json({ success: true });
-  });
-
-  // 8. Inbound Direct P2P Message
-  app.post("/api/p2p/inbox", async (req, res) => {
-    const { id, fromDomain, fromUsername, fromAvatarColor, text, imageUrl, replyTo, timestamp } = req.body;
-
-    if (!fromDomain || (!text && !imageUrl)) {
-      return res.status(400).json({ error: "Invalid message payload" });
-    }
-
-    const senderDomain = cleanDomain(fromDomain);
-    const myDomain = getAppDomain(req);
-
-    // Ensure peer exists
-    const peerRecord: PeerRecord = {
-      id: `${myDomain}_${senderDomain}`,
-      owner_domain: myDomain,
-      peer_domain: senderDomain,
-      username: fromUsername || senderDomain,
-      avatar_color: fromAvatarColor || "indigo",
-      inbox_url: `https://${senderDomain}/api/p2p/inbox`,
-      status: "accepted",
-      direction: "incoming",
-      added_at: Date.now(),
-      last_seen: Date.now(),
-    };
-    await neonDb.upsertPeer(peerRecord);
-    await neonDb.updatePeerStatus(myDomain, senderDomain, "accepted");
-    await neonDb.updatePeerStatus(senderDomain, myDomain, "accepted");
-
-    const messageRecord: MessageRecord = {
-      id: id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      target_id: senderDomain,
-      target_type: "p2p",
-      sender_id: senderDomain,
-      sender_domain: senderDomain,
-      sender_name: fromUsername || peerRecord.username,
-      sender_color: fromAvatarColor || peerRecord.avatar_color,
-      text: (text || "").trim(),
-      image_url: imageUrl || undefined,
-      reply_to: replyTo || undefined,
-      timestamp: timestamp || Date.now(),
-    };
-
-    await neonDb.insertMessage(messageRecord);
-
-    const chatMsg: ChatMessage = {
-      id: messageRecord.id,
-      targetId: senderDomain,
-      targetType: "p2p",
-      senderId: senderDomain,
-      senderDomain: senderDomain,
-      senderName: messageRecord.sender_name,
-      senderColor: messageRecord.sender_color,
-      text: messageRecord.text || "",
-      imageUrl: messageRecord.image_url,
-      replyTo: messageRecord.reply_to,
-      reactions: {},
-      timestamp: messageRecord.timestamp,
-      status: "delivered",
-    };
-
-    broadcast("message_new", chatMsg);
-    res.json({ success: true, messageId: chatMsg.id, status: "delivered" });
-  });
-
-  // 9. P2P Sync Endpoint
-  app.get("/api/p2p/sync", async (req, res) => {
-    const peerDomain = cleanDomain((req.query.peerDomain as string) || "");
-    const since = parseInt((req.query.since as string) || "0", 10);
-    const myDomain = getAppDomain(req);
-
-    const allMessages = await neonDb.getMessages(peerDomain);
-    const relevant = allMessages.filter((m) => m.timestamp > since);
-
-    const peers = await neonDb.getPeers(myDomain);
-    const peerRecord = peers.find((p) => p.peer_domain === peerDomain);
-
-    res.json({
-      success: true,
-      domain: myDomain,
-      username: nodeConfig.username,
-      avatarColor: nodeConfig.avatarColor,
-      peerStatus: peerRecord?.status || null,
-      messages: relevant.map((m) => ({
+      const formattedMessages: ChatMessage[] = (dbMessages as MessageRecord[]).map((m: MessageRecord) => ({
         id: m.id,
         targetId: m.target_id,
         targetType: m.target_type as any,
@@ -1123,31 +697,36 @@ export function createApp() {
         text: m.text || "",
         imageUrl: m.image_url,
         replyTo: m.reply_to,
+        reactions: {},
         timestamp: m.timestamp,
         status: "delivered",
-      })),
-      timestamp: Date.now(),
-    });
+        crawlerPingAck: true,
+      }));
+
+      res.json({
+        success: true,
+        syncedAt: Date.now(),
+        peers: formattedPeers,
+        messages: formattedMessages,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  // 10. Bootstrap (loads initial state from Neon DB for a specific user identity or domain)
+  // 5. CHAT BOOTSTRAP (Loads state on launch)
   app.get("/api/chat/bootstrap", async (req, res) => {
-    const userIdentifier = (
-      (req.query.userIdentifier as string) ||
-      (req.query.userEmail as string) ||
-      getAppDomain(req)
-    ).trim();
-
+    const userIdentifier = (req.query.userIdentifier as string) || "";
     const cleanUser = cleanDomain(userIdentifier);
 
     try {
       const [dbChannels, dbMessages, dbPeers] = await Promise.all([
         neonDb.getChannels(),
-        neonDb.getMessages(undefined, cleanUser),
-        neonDb.getPeers(cleanUser),
+        neonDb.getMessages("general", cleanUser),
+        cleanUser ? neonDb.getPeers(cleanUser) : Promise.resolve([]),
       ]);
 
-      const formattedChannels: ChatChannel[] = dbChannels.map((c) => ({
+      const formattedChannels: ChatChannel[] = (dbChannels as any[]).map((c: any) => ({
         id: c.id,
         name: c.name,
         description: c.description,
@@ -1155,7 +734,7 @@ export function createApp() {
         isDefault: c.id === "general",
       }));
 
-      const formattedMessages: ChatMessage[] = dbMessages.map((m) => ({
+      const formattedMessages: ChatMessage[] = (dbMessages as MessageRecord[]).map((m: MessageRecord) => ({
         id: m.id,
         targetId: m.target_id,
         targetType: m.target_type as any,
@@ -1171,7 +750,7 @@ export function createApp() {
         status: "delivered",
       }));
 
-      const formattedPeers: PeerIdentity[] = dbPeers.map((p) => ({
+      const formattedPeers: PeerIdentity[] = (dbPeers as PeerRecord[]).map((p: PeerRecord) => ({
         domain: p.peer_domain,
         username: p.username,
         avatarColor: p.avatar_color,
@@ -1203,7 +782,6 @@ export function createApp() {
         serverTime: Date.now(),
       });
     } catch (err: any) {
-      console.error("Bootstrap error, falling back to in-memory store:", err);
       const { domain: autoDomain, username: autoUsername } = getNodeIdentity(req);
       const effectiveUser = cleanUser || autoDomain;
       const effectiveUsername = autoUsername || deriveSubdomain(effectiveUser);
@@ -1223,115 +801,7 @@ export function createApp() {
     }
   });
 
-  // 11. SSE Stream
-  app.get("/api/chat/stream", (req, res) => {
-    const clientId = (req.query.clientId as string) || "";
-    const userIdentifier = (req.query.userIdentifier as string) || "";
-
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.flushHeaders?.();
-
-    res.write(`data: ${JSON.stringify({ type: "connected", serverTime: Date.now() })}\n\n`);
-
-    const client: SseClient = { res, clientId, userIdentifier };
-    sseClients.add(client);
-
-    const ping = setInterval(() => {
-      try {
-        res.write(`: ping\n\n`);
-      } catch (_) {
-        clearInterval(ping);
-        sseClients.delete(client);
-      }
-    }, 15000);
-
-    req.on("close", () => {
-      clearInterval(ping);
-      sseClients.delete(client);
-    });
-  });
-
-  // BIDIRECTIONAL SYNC (Sync client local cache up to Neon DB & Server)
-  // Ensures mobile data and PC data immediately merge without data loss
-  app.post("/api/chat/sync", async (req, res) => {
-    try {
-      const { userIdentifier, peers, messages } = req.body;
-      const cleanUser = cleanDomain(userIdentifier);
-      if (!cleanUser) {
-        return res.status(400).json({ error: "Missing userIdentifier" });
-      }
-
-      let savedPeers = 0;
-      let savedMessages = 0;
-
-      if (Array.isArray(peers) && peers.length > 0) {
-        for (const p of peers) {
-          const peerDomain = cleanDomain(p.domain);
-          if (!peerDomain || peerDomain === cleanUser) continue;
-
-          await neonDb.upsertPeer({
-            id: `${cleanUser}_${peerDomain}`,
-            owner_domain: cleanUser,
-            peer_domain: peerDomain,
-            username: p.username || peerDomain.split("@")[0].split(".")[0],
-            avatar_color: p.avatarColor || "purple",
-            inbox_url: p.inboxUrl || `https://${peerDomain}/api/p2p/inbox`,
-            status: p.status || "accepted",
-            direction: p.direction || "outgoing",
-            added_at: p.addedAt || Date.now(),
-            last_seen: p.lastSeen || Date.now(),
-          });
-
-          // If accepted, ensure the other side's peer record also exists in Neon DB
-          if (p.status === "accepted") {
-            await neonDb.upsertPeer({
-              id: `${peerDomain}_${cleanUser}`,
-              owner_domain: peerDomain,
-              peer_domain: cleanUser,
-              username: cleanUser.split("@")[0].split(".")[0],
-              avatar_color: "indigo",
-              inbox_url: `https://${cleanUser}/api/p2p/inbox`,
-              status: "accepted",
-              direction: "incoming",
-              added_at: p.addedAt || Date.now(),
-              last_seen: p.lastSeen || Date.now(),
-            });
-          }
-          savedPeers++;
-        }
-      }
-
-      if (Array.isArray(messages) && messages.length > 0) {
-        for (const m of messages) {
-          if (!m.id || (!m.text && !m.imageUrl)) continue;
-          await neonDb.insertMessage({
-            id: m.id,
-            target_id: m.targetId || "general",
-            target_type: m.targetType || "p2p",
-            sender_id: cleanDomain(m.senderId || cleanUser),
-            sender_domain: cleanDomain(m.senderDomain || cleanUser),
-            sender_name: m.senderName || cleanUser.split("@")[0].split(".")[0],
-            sender_color: m.senderColor || "indigo",
-            text: m.text || "",
-            image_url: m.imageUrl,
-            reply_to: m.replyTo,
-            timestamp: m.timestamp || Date.now(),
-          });
-          savedMessages++;
-        }
-      }
-
-      res.json({ success: true, savedPeers, savedMessages });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // 12. Send Message (Persisted directly to Neon DB)
+  // 6. CHANNEL & DIRECT MESSAGES
   app.post("/api/chat/message", async (req, res) => {
     const {
       targetId,
@@ -1339,7 +809,6 @@ export function createApp() {
       text = "",
       imageUrl,
       replyTo,
-      clientId,
       senderId,
       senderName,
       senderColor,
@@ -1368,7 +837,6 @@ export function createApp() {
       timestamp: Date.now(),
     };
 
-    // Save to Neon PostgreSQL
     await neonDb.insertMessage(msgRecord);
 
     const newMessage: ChatMessage = {
@@ -1385,50 +853,13 @@ export function createApp() {
       reactions: {},
       timestamp: msgRecord.timestamp,
       status: "delivered",
+      crawlerPingAck: true,
     };
-
-    broadcast("message_new", newMessage, clientId);
-
-    // Cross-domain forward if P2P and target has domain structure
-    if (targetType === "p2p") {
-      const cleanPeerDomain = cleanDomain(targetId);
-      await neonDb.updatePeerStatus(cleanSenderDomain, cleanPeerDomain, "accepted");
-      await neonDb.updatePeerStatus(cleanPeerDomain, cleanSenderDomain, "accepted");
-
-      if (cleanPeerDomain.includes(".") && !cleanPeerDomain.includes("@")) {
-        (async () => {
-          for (const proto of ["https", "http"]) {
-            try {
-              const remoteUrl = `${proto}://${cleanPeerDomain}/api/p2p/inbox`;
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 4000);
-              const response = await fetch(remoteUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  id: newMessage.id,
-                  fromDomain: cleanSenderDomain,
-                  fromUsername: msgRecord.sender_name,
-                  fromAvatarColor: msgRecord.sender_color,
-                  text: newMessage.text,
-                  imageUrl: newMessage.imageUrl,
-                  replyTo: newMessage.replyTo,
-                  timestamp: newMessage.timestamp,
-                }),
-                signal: controller.signal,
-              });
-              clearTimeout(timeout);
-              if (response.ok) break;
-            } catch (_) {}
-          }
-        })();
-      }
-    }
 
     res.json({ success: true, message: newMessage });
   });
 
-  // 13. Create Channel (Saved in Neon DB)
+  // 7. CREATE CHANNEL
   app.post("/api/chat/channel", async (req, res) => {
     const { name, description } = req.body;
     if (!name) return res.status(400).json({ error: "Missing channel name" });
@@ -1448,97 +879,40 @@ export function createApp() {
       created_at: newChan.createdAt,
     });
 
-    broadcast("channel_new", newChan);
     res.json({ success: true, channel: newChan });
   });
 
-  // 14. Delete Peer
+  // 8. DELETE PEER
   app.delete("/api/peer/:domain", async (req, res) => {
     const clean = cleanDomain(req.params.domain);
     const ownerDomain = cleanDomain((req.query.ownerDomain as string) || getAppDomain(req));
     await neonDb.deletePeer(ownerDomain, clean);
-    broadcast("peer_deleted", { domain: clean, ownerDomain });
-    broadcast("peer_deleted", { domain: ownerDomain, ownerDomain: clean });
+    await neonDb.deletePeer(clean, ownerDomain);
     res.json({ success: true, domain: clean });
   });
 
-  // 15. Clear Chat
+  // 9. CLEAR CHAT
   app.post("/api/chat/clear", async (req, res) => {
     const { targetId } = req.body;
     if (targetId) {
       await neonDb.clearMessages(targetId);
-      broadcast("chat_cleared", { targetId });
     }
     res.json({ success: true, targetId });
   });
 
-  // 16. Configure Node
+  // 10. CONFIGURE NODE
   app.post("/api/node/configure", (req, res) => {
     const { domain, username, avatarColor, customStatus } = req.body;
     if (domain !== undefined) nodeConfig.domain = cleanDomain(domain);
     if (username !== undefined) nodeConfig.username = username.trim();
     if (avatarColor !== undefined) nodeConfig.avatarColor = avatarColor;
     if (customStatus !== undefined) nodeConfig.customStatus = customStatus;
-    broadcast("node_config_updated", nodeConfig);
     res.json({ success: true, nodeConfig });
   });
 
-  // 17. Sync client state from localStorage
-  app.post("/api/chat/sync-client-state", async (req, res) => {
-    try {
-      const { clientDomain, clientUsername, clientAvatarColor, clientPeers, clientMessages } =
-        req.body || {};
-
-      const myDom = cleanDomain(clientDomain || nodeConfig.domain || getAppDomain(req));
-
-      if (Array.isArray(clientPeers) && clientPeers.length > 0) {
-        for (const p of clientPeers) {
-          if (p && p.domain) {
-            await neonDb.upsertPeer({
-              id: `${myDom}_${cleanDomain(p.domain)}`,
-              owner_domain: myDom,
-              peer_domain: cleanDomain(p.domain),
-              username: p.username || p.domain,
-              avatar_color: p.avatarColor || "indigo",
-              inbox_url: p.inboxUrl || `https://${cleanDomain(p.domain)}/api/p2p/inbox`,
-              status: p.status || "accepted",
-              direction: p.direction || "incoming",
-              added_at: p.addedAt || Date.now(),
-              last_seen: p.lastSeen || Date.now(),
-            });
-          }
-        }
-      }
-
-      if (Array.isArray(clientMessages) && clientMessages.length > 0) {
-        for (const m of clientMessages.slice(-50)) {
-          if (m && m.id && (m.text || m.imageUrl)) {
-            await neonDb.insertMessage({
-              id: m.id,
-              target_id: m.targetId || "general",
-              target_type: m.targetType || "channel",
-              sender_id: m.senderId || myDom,
-              sender_domain: m.senderDomain || myDom,
-              sender_name: m.senderName || clientUsername || "User",
-              sender_color: m.senderColor || clientAvatarColor || "indigo",
-              text: m.text || "",
-              image_url: m.imageUrl,
-              reply_to: m.replyTo,
-              timestamp: m.timestamp || Date.now(),
-            });
-          }
-        }
-      }
-
-      res.json({ success: true, syncedAt: Date.now() });
-    } catch (err: any) {
-      res.json({ success: false, error: err.message });
-    }
-  });
-
-  // Global catch-all error middleware for JSON responses (prevents HTML error pages)
+  // Global catch-all error middleware
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    console.error("Express uncaught route error:", err);
+    console.error("Express uncaught error:", err);
     if (!res.headersSent) {
       res.status(200).json({
         error: err?.message || "Internal server error",

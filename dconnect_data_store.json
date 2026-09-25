@@ -93,6 +93,30 @@
       "direction": "incoming",
       "added_at": 1790342522335,
       "last_seen": 1790342522335
+    },
+    {
+      "id": "alice.run.app_bob.run.app",
+      "owner_domain": "alice.run.app",
+      "peer_domain": "bob.run.app",
+      "username": "bob",
+      "avatar_color": "purple",
+      "inbox_url": "https://bob.run.app/api/crawler/ping",
+      "status": "pending",
+      "direction": "outgoing",
+      "added_at": 1790343817254,
+      "last_seen": 1790343817254
+    },
+    {
+      "id": "bob.run.app_alice.run.app",
+      "owner_domain": "bob.run.app",
+      "peer_domain": "alice.run.app",
+      "username": "alice",
+      "avatar_color": "indigo",
+      "inbox_url": "https://alice.run.app/api/crawler/ping",
+      "status": "pending",
+      "direction": "incoming",
+      "added_at": 1790343817254,
+      "last_seen": 1790343817254
     }
   ]
 }
