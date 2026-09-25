@@ -436,20 +436,21 @@ export function createApp() {
 
       // ACTION 1: FRIEND REQUEST
       if (action === "friend_request") {
-        if (cleanSender === cleanTarget) {
+        if (cleanSender === cleanTarget || (resolvedTarget && cleanSender === resolvedTarget)) {
           return res.status(400).json({ error: "Cannot send friend request to yourself" });
         }
 
         await neonDb.deletePeer(cleanSender, targetDomainOrEmail);
+        await neonDb.deletePeer(cleanSender, cleanTarget);
 
         // 1. Sender Outgoing Record
         const senderRecord: PeerRecord = {
-          id: `${cleanSender}_${targetDomainOrEmail}`,
+          id: `${cleanSender}_${cleanTarget}`,
           owner_domain: cleanSender,
-          peer_domain: targetDomainOrEmail,
+          peer_domain: cleanTarget,
           username: targetDisplayName,
           avatar_color: "purple",
-          inbox_url: `https://${targetDomainOrEmail}/api/crawler/ping`,
+          inbox_url: `https://${cleanTarget}/api/crawler/ping`,
           status: "pending",
           direction: "outgoing",
           added_at: now,
@@ -457,33 +458,43 @@ export function createApp() {
         };
         await neonDb.upsertPeer(senderRecord);
 
-        // 2. Target Incoming Record (Dual-sided Neon DB persistence)
-        const targetRecord: PeerRecord = {
-          id: `${targetDomainOrEmail}_${cleanSender}`,
-          owner_domain: targetDomainOrEmail,
-          peer_domain: cleanSender,
-          username: senderUsername || deriveSubdomain(cleanSender),
-          avatar_color: senderAvatarColor,
-          inbox_url: `https://${cleanSender}/api/crawler/ping`,
-          status: "pending",
-          direction: "incoming",
-          added_at: now,
-          last_seen: now,
-        };
-        await neonDb.upsertPeer(targetRecord);
+        // 2. Target Incoming Records (Persist for all target aliases: domain, subdomain, user)
+        const targetAliases = new Set<string>([targetDomainOrEmail, cleanTarget]);
+        if (resolvedTarget) targetAliases.add(resolvedTarget);
+        const targetSub = deriveSubdomain(cleanTarget);
+        if (targetSub) targetAliases.add(targetSub);
+        if (targetUser?.email) targetAliases.add(cleanDomain(targetUser.email));
+        if (targetUser?.id) targetAliases.add(cleanDomain(targetUser.id));
+
+        for (const alias of targetAliases) {
+          if (!alias || alias === cleanSender) continue;
+          await neonDb.upsertPeer({
+            id: `${alias}_${cleanSender}`,
+            owner_domain: alias,
+            peer_domain: cleanSender,
+            username: senderUsername || deriveSubdomain(cleanSender),
+            avatar_color: senderAvatarColor,
+            inbox_url: `https://${cleanSender}/api/crawler/ping`,
+            status: "pending",
+            direction: "incoming",
+            added_at: now,
+            last_seen: now,
+          });
+        }
 
         const computedSenderTags =
           senderTags && senderTags.length > 0
             ? senderTags
             : getUserCrawlerTags(senderUsername || cleanSender, cleanSender);
 
-        // 3. Remote crawler forward if target is on a different domain
-        if (cleanTarget.includes(".") && cleanTarget !== cleanDomain(currentDomain) && !cleanTarget.includes("@")) {
+        // 3. Remote crawler forward if target is on a remote host
+        const remoteHost = resolvedTarget.includes(".") ? resolvedTarget : (cleanTarget.includes(".") ? cleanTarget : null);
+        if (remoteHost && remoteHost !== cleanDomain(currentDomain) && !remoteHost.includes("@")) {
           for (const proto of ["https", "http"]) {
             try {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 3500);
-              const forwardRes = await fetch(`${proto}://${cleanTarget}/api/crawler/ping`, {
+              const forwardRes = await fetch(`${proto}://${remoteHost}/api/crawler/ping`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -492,7 +503,7 @@ export function createApp() {
                   senderUsername: senderUsername || cleanSender,
                   senderAvatarColor,
                   senderTags: computedSenderTags,
-                  targetIdentifier: cleanTarget,
+                  targetIdentifier: remoteHost,
                   note,
                   timestamp: now,
                 }),
@@ -803,60 +814,68 @@ export function createApp() {
 
   // 6. CHANNEL & DIRECT MESSAGES
   app.post("/api/chat/message", async (req, res) => {
-    const {
-      targetId,
-      targetType = "channel",
-      text = "",
-      imageUrl,
-      replyTo,
-      senderId,
-      senderName,
-      senderColor,
-    } = req.body;
+    try {
+      const payload = req.body?.message || req.body || {};
+      const {
+        targetId,
+        targetType = "channel",
+        text = "",
+        imageUrl,
+        replyTo,
+        senderId,
+        senderName,
+        senderColor,
+        id: customId,
+        timestamp: customTimestamp,
+      } = payload;
 
-    const myDomain = senderId || getAppDomain(req);
-    const cleanSenderDomain = cleanDomain(myDomain);
-    const cleanTargetId = targetType === "channel" ? targetId.trim().toLowerCase() : cleanDomain(targetId);
+      const myDomain = senderId || getAppDomain(req);
+      const cleanSenderDomain = cleanDomain(myDomain);
+      const cleanTargetId = targetType === "channel" ? (targetId || "general").trim().toLowerCase() : cleanDomain(targetId);
 
-    if (!targetId || (!text.trim() && !imageUrl)) {
-      return res.status(400).json({ error: "Missing required message fields" });
+      if (!targetId || (!String(text).trim() && !imageUrl)) {
+        return res.status(400).json({ error: "Missing required message fields" });
+      }
+
+      const newMessageId = customId || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const now = customTimestamp || Date.now();
+      const msgRecord: MessageRecord = {
+        id: newMessageId,
+        target_id: cleanTargetId,
+        target_type: targetType,
+        sender_id: cleanSenderDomain,
+        sender_domain: cleanSenderDomain,
+        sender_name: senderName || nodeConfig.username,
+        sender_color: senderColor || nodeConfig.avatarColor,
+        text: String(text).trim(),
+        image_url: imageUrl || undefined,
+        reply_to: replyTo || undefined,
+        timestamp: now,
+      };
+
+      await neonDb.insertMessage(msgRecord);
+
+      const newMessage: ChatMessage = {
+        id: msgRecord.id,
+        targetId: cleanTargetId,
+        targetType,
+        senderId: cleanSenderDomain,
+        senderDomain: cleanSenderDomain,
+        senderName: msgRecord.sender_name,
+        senderColor: msgRecord.sender_color,
+        text: msgRecord.text || "",
+        imageUrl: msgRecord.image_url,
+        replyTo: msgRecord.reply_to,
+        reactions: {},
+        timestamp: msgRecord.timestamp,
+        status: "delivered",
+        crawlerPingAck: true,
+      };
+
+      res.json({ success: true, message: newMessage });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to save message" });
     }
-
-    const newMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const msgRecord: MessageRecord = {
-      id: newMessageId,
-      target_id: cleanTargetId,
-      target_type: targetType,
-      sender_id: cleanSenderDomain,
-      sender_domain: cleanSenderDomain,
-      sender_name: senderName || nodeConfig.username,
-      sender_color: senderColor || nodeConfig.avatarColor,
-      text: text.trim(),
-      image_url: imageUrl || undefined,
-      reply_to: replyTo || undefined,
-      timestamp: Date.now(),
-    };
-
-    await neonDb.insertMessage(msgRecord);
-
-    const newMessage: ChatMessage = {
-      id: msgRecord.id,
-      targetId: cleanTargetId,
-      targetType,
-      senderId: cleanSenderDomain,
-      senderDomain: cleanSenderDomain,
-      senderName: msgRecord.sender_name,
-      senderColor: msgRecord.sender_color,
-      text: msgRecord.text || "",
-      imageUrl: msgRecord.image_url,
-      replyTo: msgRecord.reply_to,
-      reactions: {},
-      timestamp: msgRecord.timestamp,
-      status: "delivered",
-      crawlerPingAck: true,
-    };
-
-    res.json({ success: true, message: newMessage });
   });
 
   // 7. CREATE CHANNEL
@@ -882,12 +901,46 @@ export function createApp() {
     res.json({ success: true, channel: newChan });
   });
 
-  // 8. DELETE PEER
+  // 8. DELETE / CANCEL PEER
   app.delete("/api/peer/:domain", async (req, res) => {
-    const clean = cleanDomain(req.params.domain);
-    const ownerDomain = cleanDomain((req.query.ownerDomain as string) || getAppDomain(req));
-    await neonDb.deletePeer(ownerDomain, clean);
-    await neonDb.deletePeer(clean, ownerDomain);
+    const rawTarget = req.params.domain || "";
+    const clean = cleanDomain(rawTarget).replace(/^[#@]+/, "");
+    const peerUsername = req.query.peerUsername ? String(req.query.peerUsername).trim().toLowerCase().replace(/^[#@]+/, "") : "";
+    const currentDomain = getAppDomain(req);
+    const resolvedTarget = resolveTargetHost(clean, currentDomain);
+    const ownerDomain = cleanDomain((req.query.ownerDomain as string) || currentDomain);
+
+    const targetsToDelete = Array.from(new Set([clean, peerUsername, resolvedTarget, deriveSubdomain(clean)].filter(Boolean)));
+    for (const t of targetsToDelete) {
+      await neonDb.deletePeer(ownerDomain, t);
+      await neonDb.deletePeer(t, ownerDomain);
+      await neonDb.deletePeer(currentDomain, t);
+    }
+
+    // Forward decline/cancel to remote if remote host
+    const remoteHost = resolvedTarget.includes(".") ? resolvedTarget : (clean.includes(".") ? clean : null);
+    if (remoteHost && remoteHost !== cleanDomain(currentDomain) && !remoteHost.includes("@")) {
+      for (const proto of ["https", "http"]) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 2000);
+          await fetch(`${proto}://${remoteHost}/api/crawler/ping`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "friend_decline",
+              senderDomain: ownerDomain,
+              targetIdentifier: remoteHost,
+              timestamp: Date.now(),
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          break;
+        } catch (_) {}
+      }
+    }
+
     res.json({ success: true, domain: clean });
   });
 

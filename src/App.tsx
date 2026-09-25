@@ -299,10 +299,18 @@ export default function App() {
     }
   }, [effectiveIdentifier, googleUser?.name, urlNodeParam]);
 
-  // Initial load
+  // Initial load - runs only once per user session, zero loops, zero continuous fetching
+  const bootstrappedRef = useRef(false);
+  const lastBootstrappedIdRef = useRef<string>('');
+
   useEffect(() => {
+    const cleanId = cleanDomain(effectiveIdentifier);
+    if (!cleanId) return;
+    if (bootstrappedRef.current && lastBootstrappedIdRef.current === cleanId) return;
+    bootstrappedRef.current = true;
+    lastBootstrappedIdRef.current = cleanId;
     loadBootstrapData();
-  }, [loadBootstrapData]);
+  }, [effectiveIdentifier, loadBootstrapData]);
 
   // Handle User authentication
   const handleUserAuthenticated = (user: GoogleUserProfile) => {
@@ -316,6 +324,7 @@ export default function App() {
     const emailDomain = cleanDomain(user.email);
     setMyDomain(emailDomain);
     localStorage.setItem(STORAGE_KEYS.DOMAIN, emailDomain);
+    bootstrappedRef.current = false;
     loadBootstrapData();
   };
 
@@ -341,7 +350,7 @@ export default function App() {
   }, [myDomain, myUsername, myAvatarColor, channels, peers, messages, effectiveIdentifier]);
 
   // =========================================================================
-  // CLEVER WEB CRAWLER METHOD: ON-DEMAND CRAWL & SYNC (Zero browser hang, zero SSE)
+  // CLEVER WEB CRAWLER METHOD: ON-DEMAND CRAWL & SYNC (Zero continuous fetch, zero pooling)
   // =========================================================================
   const handleCrawlSync = async () => {
     if (isSyncingCrawler) return;
@@ -368,21 +377,6 @@ export default function App() {
       setIsSyncingCrawler(false);
     }
   };
-
-  // Sync on window focus (instant refresh when switching tabs without any interval loop)
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        handleCrawlSync();
-      }
-    };
-    window.addEventListener('visibilitychange', onVisibilityChange);
-    window.addEventListener('focus', onVisibilityChange);
-    return () => {
-      window.removeEventListener('visibilitychange', onVisibilityChange);
-      window.removeEventListener('focus', onVisibilityChange);
-    };
-  }, [effectiveIdentifier, activeTarget.id]);
 
   // Send Live Crawler Test Ping
   const handleSendTestPing = async () => {
@@ -566,27 +560,72 @@ export default function App() {
     } catch (_) {}
   };
 
+  // Match peer helper
+  const isPeerMatch = (p: PeerIdentity, target: string, username?: string) => {
+    const cleanT = cleanDomain(target).replace(/^[#@]+/, '').toLowerCase();
+    const cleanU = (username || '').replace(/^[#@]+/, '').toLowerCase();
+    const pD = cleanDomain(p.domain).replace(/^[#@]+/, '').toLowerCase();
+    const pU = (p.username || '').replace(/^[#@]+/, '').toLowerCase();
+
+    return (
+      pD === cleanT ||
+      pU === cleanT ||
+      (cleanU && (pD === cleanU || pU === cleanU)) ||
+      pD.includes(cleanT) ||
+      cleanT.includes(pD)
+    );
+  };
+
+  // CANCEL SENT FRIEND REQUEST (Removes from state & DB with zero delay)
+  const handleCancelFriendRequest = async (peer: PeerIdentity) => {
+    const targetClean = cleanDomain(peer.domain).replace(/^[#@]+/, '');
+    const peerUser = (peer.username || '').replace(/^[#@]+/, '');
+
+    setPeers((prev) => prev.filter((p) => !isPeerMatch(p, targetClean, peerUser)));
+
+    try {
+      const remaining = peers.filter((p) => !isPeerMatch(p, targetClean, peerUser));
+      localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(remaining));
+      localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(remaining));
+    } catch (_) {}
+
+    try {
+      await fetch(
+        `/api/peer/${encodeURIComponent(targetClean)}?ownerDomain=${encodeURIComponent(effectiveIdentifier)}&peerUsername=${encodeURIComponent(peerUser)}`,
+        { method: 'DELETE' }
+      );
+    } catch (_) {}
+  };
+
   // DELETE PEER
-  const handleDeletePeer = async (peerDomain: string) => {
-    const targetClean = cleanDomain(peerDomain);
-    setPeers((prev) => prev.filter((p) => cleanDomain(p.domain) !== targetClean));
+  const handleDeletePeer = async (peerDomain: string, peerUsername?: string) => {
+    const targetClean = cleanDomain(peerDomain).replace(/^[#@]+/, '');
+    const cleanUser = (peerUsername || '').replace(/^[#@]+/, '');
+
+    setPeers((prev) => prev.filter((p) => !isPeerMatch(p, targetClean, cleanUser)));
     setMessages((prev) =>
       prev.filter(
         (m) =>
-          cleanDomain(m.targetId) !== targetClean &&
-          cleanDomain(m.senderDomain || '') !== targetClean &&
-          cleanDomain(m.senderId || '') !== targetClean
+          !cleanDomain(m.targetId).includes(targetClean) &&
+          !cleanDomain(m.senderDomain || '').includes(targetClean) &&
+          !cleanDomain(m.senderId || '').includes(targetClean)
       )
     );
 
     try {
+      const remaining = peers.filter((p) => !isPeerMatch(p, targetClean, cleanUser));
+      localStorage.setItem(getUserStorageKey(STORAGE_KEYS.PEERS, effectiveIdentifier), JSON.stringify(remaining));
+      localStorage.setItem(STORAGE_KEYS.PEERS, JSON.stringify(remaining));
+    } catch (_) {}
+
+    try {
       await fetch(
-        `/api/peer/${encodeURIComponent(targetClean)}?ownerDomain=${encodeURIComponent(effectiveIdentifier)}`,
+        `/api/peer/${encodeURIComponent(targetClean)}?ownerDomain=${encodeURIComponent(effectiveIdentifier)}&peerUsername=${encodeURIComponent(cleanUser)}`,
         { method: 'DELETE' }
       );
     } catch (_) {}
 
-    if (activeTarget.type === 'p2p' && cleanDomain(activeTarget.id) === targetClean) {
+    if (activeTarget.type === 'p2p' && cleanDomain(activeTarget.id).includes(targetClean)) {
       setActiveTarget({ id: 'general', type: 'channel', name: 'general' });
     }
   };
@@ -954,10 +993,12 @@ export default function App() {
                   <div className="flex items-center space-x-2 min-w-0">
                     <Clock className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                     <span className="text-white font-medium truncate">#{peer.username}</span>
+                    <span className="text-[10px] text-slate-500 truncate">@{peer.domain}</span>
                   </div>
                   <button
-                    onClick={() => handleDeletePeer(peer.domain)}
-                    className="text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                    onClick={() => handleCancelFriendRequest(peer)}
+                    title="Cancel sent friend request"
+                    className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition cursor-pointer"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>

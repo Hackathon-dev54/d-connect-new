@@ -19,81 +19,20 @@
       "sender_color": "indigo",
       "text": "Hello friend via crawler ping!",
       "timestamp": 1790341947518
+    },
+    {
+      "id": "msg_1790344866146_90nt",
+      "target_id": "general",
+      "target_type": "channel",
+      "sender_id": "killerbeast480@gmail.com",
+      "sender_domain": "killerbeast480@gmail.com",
+      "sender_name": "killerbeast480",
+      "sender_color": "indigo",
+      "text": "Hello everyone from clever shipper!",
+      "timestamp": 1790344866146
     }
   ],
   "peers": [
-    {
-      "id": "killerbeast480@gmail.com_ucouses@gmail.com",
-      "owner_domain": "killerbeast480@gmail.com",
-      "peer_domain": "ucouses@gmail.com",
-      "username": "ucouses",
-      "avatar_color": "purple",
-      "inbox_url": "https://ucouses@gmail.com/api/p2p/inbox",
-      "status": "pending",
-      "direction": "outgoing",
-      "added_at": 1790260777180,
-      "last_seen": 1790260777180
-    },
-    {
-      "id": "ucouses@gmail.com_killerbeast480@gmail.com",
-      "owner_domain": "ucouses@gmail.com",
-      "peer_domain": "killerbeast480@gmail.com",
-      "username": "KillerBeast",
-      "avatar_color": "indigo",
-      "inbox_url": "https://killerbeast480@gmail.com/api/p2p/inbox",
-      "status": "pending",
-      "direction": "incoming",
-      "added_at": 1790260777180,
-      "last_seen": 1790260777180
-    },
-    {
-      "id": "killerbeast480@gmail.com_friend@gmail.com",
-      "owner_domain": "killerbeast480@gmail.com",
-      "peer_domain": "friend@gmail.com",
-      "username": "friend",
-      "avatar_color": "purple",
-      "inbox_url": "https://friend@gmail.com/api/crawler/ping",
-      "status": "accepted",
-      "direction": "outgoing",
-      "added_at": 1790341937055,
-      "last_seen": 1790341947519
-    },
-    {
-      "id": "friend@gmail.com_killerbeast480@gmail.com",
-      "owner_domain": "friend@gmail.com",
-      "peer_domain": "killerbeast480@gmail.com",
-      "username": "KillerBeast",
-      "avatar_color": "indigo",
-      "inbox_url": "https://killerbeast480@gmail.com/api/crawler/ping",
-      "status": "accepted",
-      "direction": "incoming",
-      "added_at": 1790341937055,
-      "last_seen": 1790341947519
-    },
-    {
-      "id": "killerbeast480@gmail.com_<tag: #udemycouses",
-      "owner_domain": "killerbeast480@gmail.com",
-      "peer_domain": "<tag: #udemycouses",
-      "username": "<tag: #udemycouses",
-      "avatar_color": "purple",
-      "inbox_url": "https://<tag: #udemycouses/api/crawler/ping",
-      "status": "pending",
-      "direction": "outgoing",
-      "added_at": 1790342522335,
-      "last_seen": 1790342522335
-    },
-    {
-      "id": "<tag: #udemycouses_killerbeast480@gmail.com",
-      "owner_domain": "<tag: #udemycouses",
-      "peer_domain": "killerbeast480@gmail.com",
-      "username": "KillerBeast",
-      "avatar_color": "indigo",
-      "inbox_url": "https://killerbeast480@gmail.com/api/crawler/ping",
-      "status": "pending",
-      "direction": "incoming",
-      "added_at": 1790342522335,
-      "last_seen": 1790342522335
-    },
     {
       "id": "alice.run.app_bob.run.app",
       "owner_domain": "alice.run.app",

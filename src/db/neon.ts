@@ -1,6 +1,7 @@
 import { neon } from '@neondatabase/serverless';
 import fs from 'fs';
 import path from 'path';
+import { deriveSubdomain } from '../utils/domain';
 
 export interface UserRecord {
   id: string;
@@ -834,8 +835,14 @@ export const neonDb = {
   },
 
   async getPeers(ownerDomain: string): Promise<PeerRecord[]> {
-    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
+    const cleanOwner = (ownerDomain || '').trim().toLowerCase().replace(/^[#@]+/, '');
     if (!cleanOwner) return [];
+
+    const ownerSub = deriveSubdomain(cleanOwner);
+    const ownerName = cleanOwner.includes('@') ? cleanOwner.split('@')[0] : '';
+    const aliases = new Set<string>([cleanOwner]);
+    if (ownerSub) aliases.add(ownerSub);
+    if (ownerName) aliases.add(ownerName);
 
     const url = getDbUrl();
     if (url) {
@@ -843,8 +850,25 @@ export const neonDb = {
         const sql = neon(url);
         await initTables(sql);
 
-        // Fetch peer records owned by cleanOwner, joining with counterpart record to resolve status
-        // and joining with users table to get friend's authentic display name
+        // Find associated user's node domain & other attributes
+        const userRows = await sql`
+          SELECT domain, email, name, id FROM users 
+          WHERE LOWER(email) = ${cleanOwner} 
+             OR LOWER(id) = ${cleanOwner} 
+             OR LOWER(name) = ${cleanOwner}
+             OR (${ownerSub !== ''} AND LOWER(domain) = ${ownerSub})
+          LIMIT 5;
+        `;
+        for (const u of userRows) {
+          if (u.domain) aliases.add(u.domain.toLowerCase().trim());
+          if (u.email) aliases.add(u.email.toLowerCase().trim());
+          if (u.name) aliases.add(u.name.toLowerCase().trim());
+          if (u.id) aliases.add(u.id.toLowerCase().trim());
+        }
+
+        const aliasList = Array.from(aliases);
+
+        // Fetch peer records owned by ANY of user's aliases OR sent to ANY of user's aliases
         const rows = await sql`
           SELECT 
             p.id,
@@ -864,72 +888,52 @@ export const neonDb = {
            AND LOWER(cp.peer_domain) = LOWER(p.owner_domain)
           LEFT JOIN users u 
             ON LOWER(u.email) = LOWER(p.peer_domain) OR LOWER(u.id) = LOWER(p.peer_domain)
-          WHERE LOWER(p.owner_domain) = ${cleanOwner}
+          WHERE LOWER(p.owner_domain) = ANY(${aliasList})
+             OR LOWER(p.peer_domain) = ANY(${aliasList})
+             OR LOWER(p.id) = ANY(${aliasList})
           ORDER BY p.added_at DESC;
         `;
 
         const peersMap = new Map<string, PeerRecord>();
 
         for (const row of rows) {
-          const pd = (row.peer_domain || '').toLowerCase().trim();
-          if (!pd || pd === cleanOwner) continue;
-          // Keep the newest record because rows are ordered by added_at DESC
-          if (peersMap.has(pd)) continue;
+          const owner = (row.owner_domain || '').toLowerCase().trim();
+          const peer = (row.peer_domain || '').toLowerCase().trim();
 
-          // The username MUST always be the friend's name, never the owner's name!
-          const friendName = row.real_user_name || row.username || pd.split('@')[0];
+          const isOwnerMe = aliases.has(owner);
+          const isPeerMe = aliases.has(peer);
 
-          peersMap.set(pd, {
-            id: `${cleanOwner}_${pd}`,
+          // Determine peer domain from the other side
+          let otherSide = isOwnerMe ? peer : owner;
+          if (!otherSide || aliases.has(otherSide)) {
+            if (isPeerMe && !isOwnerMe) otherSide = owner;
+            else if (!isPeerMe && isOwnerMe) otherSide = peer;
+            else continue;
+          }
+
+          if (peersMap.has(otherSide)) continue;
+
+          // Determine direction
+          let dir = row.direction;
+          if (isPeerMe && !isOwnerMe && dir === 'outgoing') {
+            dir = 'incoming';
+          } else if (isOwnerMe && !isPeerMe && dir === 'incoming') {
+            // keep as is
+          }
+
+          const friendName = row.real_user_name || row.username || deriveSubdomain(otherSide);
+
+          peersMap.set(otherSide, {
+            id: `${cleanOwner}_${otherSide}`,
             owner_domain: cleanOwner,
-            peer_domain: pd,
+            peer_domain: otherSide,
             username: friendName,
             avatar_color: row.avatar_color || 'purple',
             inbox_url: row.inbox_url,
             status: row.status,
-            direction: row.direction,
+            direction: dir as any,
             added_at: Number(row.added_at),
             last_seen: Number(row.last_seen),
-          });
-        }
-
-        // Also check if any incoming request exists for cleanOwner that hasn't created a local record yet
-        const incomingRows = await sql`
-          SELECT 
-            cp.id,
-            cp.owner_domain as sender_domain,
-            cp.status,
-            cp.added_at,
-            cp.last_seen,
-            u.name as sender_name
-          FROM peers cp
-          LEFT JOIN users u 
-            ON LOWER(u.email) = LOWER(cp.owner_domain) OR LOWER(u.id) = LOWER(cp.owner_domain)
-          WHERE LOWER(cp.peer_domain) = ${cleanOwner}
-            AND NOT EXISTS (
-              SELECT 1 FROM peers p 
-              WHERE LOWER(p.owner_domain) = ${cleanOwner} 
-                AND LOWER(p.peer_domain) = LOWER(cp.owner_domain)
-            )
-          ORDER BY cp.added_at DESC;
-        `;
-
-        for (const inc of incomingRows) {
-          const sender = (inc.sender_domain || '').toLowerCase().trim();
-          if (!sender || sender === cleanOwner || peersMap.has(sender)) continue;
-
-          const senderName = inc.sender_name || sender.split('@')[0];
-          peersMap.set(sender, {
-            id: `${cleanOwner}_${sender}`,
-            owner_domain: cleanOwner,
-            peer_domain: sender,
-            username: senderName,
-            avatar_color: 'purple',
-            inbox_url: `https://${sender}/api/p2p/inbox`,
-            status: inc.status || 'pending',
-            direction: 'incoming',
-            added_at: Number(inc.added_at),
-            last_seen: Number(inc.last_seen),
           });
         }
 
@@ -940,65 +944,75 @@ export const neonDb = {
     }
 
     // Memory Store fallback
+    const user = memoryStore.users.get(cleanOwner);
+    if (user?.domain) aliases.add(user.domain.toLowerCase().trim());
+    if (user?.email) aliases.add(user.email.toLowerCase().trim());
+    if (user?.name) aliases.add(user.name.toLowerCase().trim());
+
+    const isMe = (d: string) => aliases.has((d || '').toLowerCase().trim());
+
     const peersMap = new Map<string, PeerRecord>();
     const sortedPeers = Array.from(memoryStore.peers.values()).sort((a, b) => (b.added_at || 0) - (a.added_at || 0));
+
     for (const p of sortedPeers) {
-      if (p.owner_domain.toLowerCase() === cleanOwner) {
-        const pd = p.peer_domain.toLowerCase();
-        if (peersMap.has(pd)) continue; // Keep newest
-        peersMap.set(pd, { ...p });
-      }
-    }
-    for (const cp of sortedPeers) {
-      if (cp.peer_domain.toLowerCase() === cleanOwner) {
-        const sender = cp.owner_domain.toLowerCase();
-        if (!peersMap.has(sender)) {
-          peersMap.set(sender, {
-            id: `${cleanOwner}_${sender}`,
+      const o = (p.owner_domain || '').toLowerCase().trim();
+      const d = (p.peer_domain || '').toLowerCase().trim();
+
+      if (isMe(o) && !isMe(d)) {
+        if (!peersMap.has(d)) {
+          peersMap.set(d, {
+            ...p,
+            id: `${cleanOwner}_${d}`,
             owner_domain: cleanOwner,
-            peer_domain: sender,
-            username: sender.split('@')[0],
-            avatar_color: 'purple',
-            inbox_url: `https://${sender}/api/p2p/inbox`,
-            status: cp.status || 'pending',
+            peer_domain: d,
+          });
+        }
+      } else if (isMe(d) && !isMe(o)) {
+        if (!peersMap.has(o)) {
+          peersMap.set(o, {
+            ...p,
+            id: `${cleanOwner}_${o}`,
+            owner_domain: cleanOwner,
+            peer_domain: o,
+            username: p.username || deriveSubdomain(o),
             direction: 'incoming',
-            added_at: cp.added_at,
-            last_seen: cp.last_seen,
           });
         }
       }
     }
+
     return Array.from(peersMap.values());
   },
 
   async deletePeer(ownerDomain: string, peerDomain: string): Promise<void> {
-    const cleanOwner = (ownerDomain || '').trim().toLowerCase();
-    const cleanPeer = (peerDomain || '').trim().toLowerCase();
-    if (!cleanOwner || !cleanPeer) return;
+    const cleanOwner = (ownerDomain || '').trim().toLowerCase().replace(/^[#@]+/, '');
+    const cleanPeer = (peerDomain || '').trim().toLowerCase().replace(/^[#@]+/, '');
+    if (!cleanPeer) return;
 
-    const id1 = `${cleanOwner}_${cleanPeer}`;
-    const id2 = `${cleanPeer}_${cleanOwner}`;
+    const ownerSub = cleanOwner ? deriveSubdomain(cleanOwner) : '';
+    const peerSub = cleanPeer ? deriveSubdomain(cleanPeer) : '';
+    const ownerName = cleanOwner.includes('@') ? cleanOwner.split('@')[0] : '';
+    const peerName = cleanPeer.includes('@') ? cleanPeer.split('@')[0] : '';
+
+    const targets = new Set(
+      [cleanPeer, peerSub, peerName].filter((s) => s && s.length > 0)
+    );
 
     // 1. Remove from memory store
-    memoryStore.peers.delete(id1);
-    memoryStore.peers.delete(id2);
-    for (const key of Array.from(memoryStore.peers.keys())) {
-      const lk = key.toLowerCase();
-      if (lk === id1 || lk === id2) {
+    for (const [key, p] of Array.from(memoryStore.peers.entries())) {
+      const o = (p.owner_domain || '').toLowerCase().trim();
+      const d = (p.peer_domain || '').toLowerCase().trim();
+      const u = (p.username || '').toLowerCase().trim();
+      const id = (p.id || '').toLowerCase().trim();
+
+      const matchesTarget = Array.from(targets).some(
+        (t) => d === t || d.includes(t) || t.includes(d) || u === t || id.includes(t) || o === t || o.includes(t)
+      );
+
+      if (matchesTarget) {
         memoryStore.peers.delete(key);
       }
     }
-    // Also remove direct messages between them in memory
-    memoryStore.messages = memoryStore.messages.filter(
-      (m) =>
-        !(
-          (m.target_type === 'p2p' || !m.target_type) &&
-          ((m.sender_id.toLowerCase() === cleanOwner && m.target_id.toLowerCase() === cleanPeer) ||
-           (m.sender_id.toLowerCase() === cleanPeer && m.target_id.toLowerCase() === cleanOwner) ||
-           (m.sender_domain.toLowerCase() === cleanOwner && m.target_id.toLowerCase() === cleanPeer) ||
-           (m.sender_domain.toLowerCase() === cleanPeer && m.target_id.toLowerCase() === cleanOwner))
-        )
-    );
     memoryStore.saveToDisk();
 
     // 2. Remove from Neon PostgreSQL
@@ -1007,24 +1021,14 @@ export const neonDb = {
       try {
         const sql = neon(url);
         await initTables(sql);
-        // Delete peer records in both directions
         await sql`
           DELETE FROM peers 
-          WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${cleanPeer})
-             OR (LOWER(owner_domain) = ${cleanPeer} AND LOWER(peer_domain) = ${cleanOwner})
-             OR LOWER(id) = ${id1}
-             OR LOWER(id) = ${id2};
-        `;
-        // Delete direct messages between both parties
-        await sql`
-          DELETE FROM messages 
-          WHERE (target_type = 'p2p' OR target_type IS NULL)
-            AND (
-              (LOWER(sender_id) = ${cleanOwner} AND LOWER(target_id) = ${cleanPeer}) OR
-              (LOWER(sender_id) = ${cleanPeer} AND LOWER(target_id) = ${cleanOwner}) OR
-              (LOWER(sender_domain) = ${cleanOwner} AND LOWER(target_id) = ${cleanPeer}) OR
-              (LOWER(sender_domain) = ${cleanPeer} AND LOWER(target_id) = ${cleanOwner})
-            );
+          WHERE LOWER(peer_domain) = ${cleanPeer}
+             OR LOWER(peer_domain) LIKE ${'%' + cleanPeer + '%'}
+             OR LOWER(owner_domain) = ${cleanPeer}
+             OR LOWER(owner_domain) LIKE ${'%' + cleanPeer + '%'}
+             OR LOWER(username) = ${cleanPeer}
+             OR LOWER(id) LIKE ${'%' + cleanPeer + '%'};
         `;
       } catch (err) {
         console.error('Neon deletePeer error:', err);
