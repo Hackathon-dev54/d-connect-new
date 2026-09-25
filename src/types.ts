@@ -1,46 +1,14 @@
 export interface PeerIdentity {
-  domain: string; // e.g. "alice.chat.org" or "bob.domain.com"
+  domain: string; // e.g. "alice.chat.org" or "bob@gmail.com"
   username: string;
   avatarColor: string;
   publicKey?: string;
-  inboxUrl: string; // e.g. "https://alice.chat.org/api/p2p/inbox"
+  inboxUrl: string;
   status: 'pending' | 'accepted' | 'rejected' | 'blocked';
   direction: 'incoming' | 'outgoing'; // who sent the request
   lastSeen?: number;
   addedAt: number;
-}
-
-export interface PeerRequestPayload {
-  fromDomain: string;
-  fromUsername: string;
-  fromAvatarColor: string;
-  fromInboxUrl: string;
-  note?: string;
-  timestamp: number;
-}
-
-export interface PeerAcceptPayload {
-  fromDomain: string;
-  fromUsername: string;
-  fromAvatarColor: string;
-  fromInboxUrl: string;
-  timestamp: number;
-}
-
-export interface PeerMessagePayload {
-  id: string;
-  fromDomain: string;
-  fromUsername: string;
-  fromAvatarColor: string;
-  toDomain: string;
-  text: string;
-  imageUrl?: string;
-  replyTo?: {
-    id: string;
-    senderName: string;
-    text: string;
-  };
-  timestamp: number;
+  crawlerTags?: string[]; // Mini discovery tags for crawler ping
 }
 
 export interface ChatChannel {
@@ -70,6 +38,7 @@ export interface ChatMessage {
   reactions: Record<string, string[]>;
   timestamp: number;
   status?: 'sending' | 'delivered' | 'failed';
+  crawlerPingAck?: boolean;
 }
 
 export interface TypingIndicator {
@@ -80,16 +49,18 @@ export interface TypingIndicator {
 }
 
 export interface NodeManifest {
-  protocol: 'IMAGXP-P2P/1.0';
+  protocol: 'CRAWLER-PING/2.1';
   domain: string;
   username: string;
   avatarColor: string;
   status: string;
   endpoints: {
-    inbox: string;
+    ping: string;
+    webhook: string;
     discovery: string;
-    request: string;
+    dbStatus: string;
   };
+  crawlerTags: string[];
 }
 
 export interface ChatBootstrapData {
@@ -100,4 +71,5 @@ export interface ChatBootstrapData {
   messages: ChatMessage[];
   peers: PeerIdentity[];
   serverTime: number;
+  crawlerTags?: string[];
 }

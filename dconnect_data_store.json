@@ -8,7 +8,19 @@
       "created_at": 1700000000000
     }
   ],
-  "messages": [],
+  "messages": [
+    {
+      "id": "msg_1790341947518_p8t9",
+      "target_id": "friend@gmail.com",
+      "target_type": "p2p",
+      "sender_id": "killerbeast480@gmail.com",
+      "sender_domain": "killerbeast480@gmail.com",
+      "sender_name": "KillerBeast",
+      "sender_color": "indigo",
+      "text": "Hello friend via crawler ping!",
+      "timestamp": 1790341947518
+    }
+  ],
   "peers": [
     {
       "id": "killerbeast480@gmail.com_ucouses@gmail.com",
@@ -33,6 +45,30 @@
       "direction": "incoming",
       "added_at": 1790260777180,
       "last_seen": 1790260777180
+    },
+    {
+      "id": "killerbeast480@gmail.com_friend@gmail.com",
+      "owner_domain": "killerbeast480@gmail.com",
+      "peer_domain": "friend@gmail.com",
+      "username": "friend",
+      "avatar_color": "purple",
+      "inbox_url": "https://friend@gmail.com/api/crawler/ping",
+      "status": "accepted",
+      "direction": "outgoing",
+      "added_at": 1790341937055,
+      "last_seen": 1790341947519
+    },
+    {
+      "id": "friend@gmail.com_killerbeast480@gmail.com",
+      "owner_domain": "friend@gmail.com",
+      "peer_domain": "killerbeast480@gmail.com",
+      "username": "KillerBeast",
+      "avatar_color": "indigo",
+      "inbox_url": "https://killerbeast480@gmail.com/api/crawler/ping",
+      "status": "accepted",
+      "direction": "incoming",
+      "added_at": 1790341937055,
+      "last_seen": 1790341947519
     }
   ]
 }

@@ -654,103 +654,171 @@ var neonDb = {
       }
     }
   },
+  async clearDirectMessages(userA, userB) {
+    const a = (userA || "").trim().toLowerCase();
+    const b = (userB || "").trim().toLowerCase();
+    if (!a || !b) return;
+    memoryStore.messages = memoryStore.messages.filter(
+      (m) => !((m.target_type === "p2p" || !m.target_type) && (m.sender_id.toLowerCase() === a && m.target_id.toLowerCase() === b || m.sender_id.toLowerCase() === b && m.target_id.toLowerCase() === a || m.sender_domain.toLowerCase() === a && m.target_id.toLowerCase() === b || m.sender_domain.toLowerCase() === b && m.target_id.toLowerCase() === a))
+    );
+    memoryStore.saveToDisk();
+    const url = getDbUrl();
+    if (url) {
+      try {
+        const sql = neon(url);
+        await initTables(sql);
+        await sql`
+          DELETE FROM messages 
+          WHERE (target_type = 'p2p' OR target_type IS NULL)
+            AND (
+              (LOWER(sender_id) = ${a} AND LOWER(target_id) = ${b}) OR
+              (LOWER(sender_id) = ${b} AND LOWER(target_id) = ${a}) OR
+              (LOWER(sender_domain) = ${a} AND LOWER(target_id) = ${b}) OR
+              (LOWER(sender_domain) = ${b} AND LOWER(target_id) = ${a})
+            );
+        `;
+      } catch (err) {
+        console.error("Neon clearDirectMessages error:", err);
+      }
+    }
+  },
   async getPeers(ownerDomain) {
     const cleanOwner = (ownerDomain || "").trim().toLowerCase();
+    if (!cleanOwner) return [];
     const url = getDbUrl();
     if (url) {
       try {
         const sql = neon(url);
         await initTables(sql);
         const rows = await sql`
-          SELECT * FROM peers 
-          WHERE LOWER(owner_domain) = ${cleanOwner} OR LOWER(peer_domain) = ${cleanOwner}
-          ORDER BY last_seen DESC;
+          SELECT 
+            p.id,
+            p.owner_domain,
+            p.peer_domain,
+            p.username,
+            p.avatar_color,
+            p.inbox_url,
+            p.status,
+            p.direction,
+            p.added_at,
+            GREATEST(p.last_seen, COALESCE(cp.last_seen, 0)) as last_seen,
+            u.name as real_user_name
+          FROM peers p
+          LEFT JOIN peers cp 
+            ON LOWER(cp.owner_domain) = LOWER(p.peer_domain) 
+           AND LOWER(cp.peer_domain) = LOWER(p.owner_domain)
+          LEFT JOIN users u 
+            ON LOWER(u.email) = LOWER(p.peer_domain) OR LOWER(u.id) = LOWER(p.peer_domain)
+          WHERE LOWER(p.owner_domain) = ${cleanOwner}
+          ORDER BY p.added_at DESC;
         `;
-        const peersMap = /* @__PURE__ */ new Map();
-        const peersToHealAccepted = [];
+        const peersMap2 = /* @__PURE__ */ new Map();
         for (const row of rows) {
-          const rOwner = (row.owner_domain || "").toLowerCase();
-          const rPeer = (row.peer_domain || "").toLowerCase();
-          const otherDomain = rOwner === cleanOwner ? rPeer : rOwner;
-          if (!otherDomain) continue;
-          let status = row.status;
-          let direction = row.direction;
-          if (rOwner !== cleanOwner) {
-            direction = direction === "outgoing" ? "incoming" : "outgoing";
-          }
-          const existing = peersMap.get(otherDomain);
-          if (existing) {
-            if (status === "accepted" || existing.status === "accepted") {
-              existing.status = "accepted";
-              peersToHealAccepted.push(otherDomain);
-            }
-          } else {
-            peersMap.set(otherDomain, {
-              id: `${cleanOwner}_${otherDomain}`,
-              owner_domain: cleanOwner,
-              peer_domain: otherDomain,
-              username: row.username,
-              avatar_color: row.avatar_color,
-              inbox_url: row.inbox_url,
-              status,
-              direction,
-              added_at: Number(row.added_at),
-              last_seen: Number(row.last_seen)
-            });
-          }
+          const pd = (row.peer_domain || "").toLowerCase().trim();
+          if (!pd || pd === cleanOwner) continue;
+          if (peersMap2.has(pd)) continue;
+          const friendName = row.real_user_name || row.username || pd.split("@")[0];
+          peersMap2.set(pd, {
+            id: `${cleanOwner}_${pd}`,
+            owner_domain: cleanOwner,
+            peer_domain: pd,
+            username: friendName,
+            avatar_color: row.avatar_color || "purple",
+            inbox_url: row.inbox_url,
+            status: row.status,
+            direction: row.direction,
+            added_at: Number(row.added_at),
+            last_seen: Number(row.last_seen)
+          });
         }
-        try {
-          const conversed = await sql`
-            SELECT DISTINCT
-              CASE 
-                WHEN LOWER(sender_id) = ${cleanOwner} OR LOWER(sender_domain) = ${cleanOwner} THEN LOWER(target_id)
-                ELSE LOWER(sender_id)
-              END as peer_domain
-            FROM messages
-            WHERE target_type = 'p2p'
-              AND (
-                LOWER(sender_id) = ${cleanOwner} OR 
-                LOWER(sender_domain) = ${cleanOwner} OR 
-                LOWER(target_id) = ${cleanOwner}
-              );
-          `;
-          for (const c of conversed) {
-            const pd = (c.peer_domain || "").toLowerCase();
-            if (pd && pd !== cleanOwner && peersMap.has(pd)) {
-              const p = peersMap.get(pd);
-              if (p.status !== "accepted") {
-                p.status = "accepted";
-                peersToHealAccepted.push(pd);
-              }
-            }
-          }
-        } catch (_) {
+        const incomingRows = await sql`
+          SELECT 
+            cp.id,
+            cp.owner_domain as sender_domain,
+            cp.status,
+            cp.added_at,
+            cp.last_seen,
+            u.name as sender_name
+          FROM peers cp
+          LEFT JOIN users u 
+            ON LOWER(u.email) = LOWER(cp.owner_domain) OR LOWER(u.id) = LOWER(cp.owner_domain)
+          WHERE LOWER(cp.peer_domain) = ${cleanOwner}
+            AND NOT EXISTS (
+              SELECT 1 FROM peers p 
+              WHERE LOWER(p.owner_domain) = ${cleanOwner} 
+                AND LOWER(p.peer_domain) = LOWER(cp.owner_domain)
+            )
+          ORDER BY cp.added_at DESC;
+        `;
+        for (const inc of incomingRows) {
+          const sender = (inc.sender_domain || "").toLowerCase().trim();
+          if (!sender || sender === cleanOwner || peersMap2.has(sender)) continue;
+          const senderName = inc.sender_name || sender.split("@")[0];
+          peersMap2.set(sender, {
+            id: `${cleanOwner}_${sender}`,
+            owner_domain: cleanOwner,
+            peer_domain: sender,
+            username: senderName,
+            avatar_color: "purple",
+            inbox_url: `https://${sender}/api/p2p/inbox`,
+            status: inc.status || "pending",
+            direction: "incoming",
+            added_at: Number(inc.added_at),
+            last_seen: Number(inc.last_seen)
+          });
         }
-        if (peersToHealAccepted.length > 0) {
-          (async () => {
-            try {
-              for (const pDomain of peersToHealAccepted) {
-                await sql`
-                  UPDATE peers
-                  SET status = 'accepted'
-                  WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${pDomain})
-                     OR (LOWER(owner_domain) = ${pDomain} AND LOWER(peer_domain) = ${cleanOwner});
-                `;
-              }
-            } catch (_) {
-            }
-          })();
-        }
-        return Array.from(peersMap.values());
+        return Array.from(peersMap2.values());
       } catch (err) {
         console.error("Neon getPeers error:", err);
       }
     }
-    return Array.from(memoryStore.peers.values()).filter((p) => p.owner_domain === cleanOwner);
+    const peersMap = /* @__PURE__ */ new Map();
+    const sortedPeers = Array.from(memoryStore.peers.values()).sort((a, b) => (b.added_at || 0) - (a.added_at || 0));
+    for (const p of sortedPeers) {
+      if (p.owner_domain.toLowerCase() === cleanOwner) {
+        const pd = p.peer_domain.toLowerCase();
+        if (peersMap.has(pd)) continue;
+        peersMap.set(pd, { ...p });
+      }
+    }
+    for (const cp of sortedPeers) {
+      if (cp.peer_domain.toLowerCase() === cleanOwner) {
+        const sender = cp.owner_domain.toLowerCase();
+        if (!peersMap.has(sender)) {
+          peersMap.set(sender, {
+            id: `${cleanOwner}_${sender}`,
+            owner_domain: cleanOwner,
+            peer_domain: sender,
+            username: sender.split("@")[0],
+            avatar_color: "purple",
+            inbox_url: `https://${sender}/api/p2p/inbox`,
+            status: cp.status || "pending",
+            direction: "incoming",
+            added_at: cp.added_at,
+            last_seen: cp.last_seen
+          });
+        }
+      }
+    }
+    return Array.from(peersMap.values());
   },
   async deletePeer(ownerDomain, peerDomain) {
-    const id = `${ownerDomain}_${peerDomain}`;
-    memoryStore.peers.delete(id);
+    const cleanOwner = (ownerDomain || "").trim().toLowerCase();
+    const cleanPeer = (peerDomain || "").trim().toLowerCase();
+    if (!cleanOwner || !cleanPeer) return;
+    const id1 = `${cleanOwner}_${cleanPeer}`;
+    const id2 = `${cleanPeer}_${cleanOwner}`;
+    memoryStore.peers.delete(id1);
+    memoryStore.peers.delete(id2);
+    for (const key of Array.from(memoryStore.peers.keys())) {
+      const lk = key.toLowerCase();
+      if (lk === id1 || lk === id2) {
+        memoryStore.peers.delete(key);
+      }
+    }
+    memoryStore.messages = memoryStore.messages.filter(
+      (m) => !((m.target_type === "p2p" || !m.target_type) && (m.sender_id.toLowerCase() === cleanOwner && m.target_id.toLowerCase() === cleanPeer || m.sender_id.toLowerCase() === cleanPeer && m.target_id.toLowerCase() === cleanOwner || m.sender_domain.toLowerCase() === cleanOwner && m.target_id.toLowerCase() === cleanPeer || m.sender_domain.toLowerCase() === cleanPeer && m.target_id.toLowerCase() === cleanOwner))
+    );
     memoryStore.saveToDisk();
     const url = getDbUrl();
     if (url) {
@@ -759,7 +827,20 @@ var neonDb = {
         await initTables(sql);
         await sql`
           DELETE FROM peers 
-          WHERE owner_domain = ${ownerDomain} AND peer_domain = ${peerDomain};
+          WHERE (LOWER(owner_domain) = ${cleanOwner} AND LOWER(peer_domain) = ${cleanPeer})
+             OR (LOWER(owner_domain) = ${cleanPeer} AND LOWER(peer_domain) = ${cleanOwner})
+             OR LOWER(id) = ${id1}
+             OR LOWER(id) = ${id2};
+        `;
+        await sql`
+          DELETE FROM messages 
+          WHERE (target_type = 'p2p' OR target_type IS NULL)
+            AND (
+              (LOWER(sender_id) = ${cleanOwner} AND LOWER(target_id) = ${cleanPeer}) OR
+              (LOWER(sender_id) = ${cleanPeer} AND LOWER(target_id) = ${cleanOwner}) OR
+              (LOWER(sender_domain) = ${cleanOwner} AND LOWER(target_id) = ${cleanPeer}) OR
+              (LOWER(sender_domain) = ${cleanPeer} AND LOWER(target_id) = ${cleanOwner})
+            );
         `;
       } catch (err) {
         console.error("Neon deletePeer error:", err);
@@ -769,6 +850,16 @@ var neonDb = {
 };
 
 // src/app-server.ts
+function getUserCrawlerTags(username, domain) {
+  const safeUser = (username || "user").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const safeDomain = (domain || "node").toLowerCase().split(".")[0].replace(/[^a-z0-9]/g, "");
+  return [
+    `#${safeUser || "user"}`,
+    `tag:${safeDomain || "node"}`,
+    `crawler-ping:active`,
+    `webhook:hybrid-v2`
+  ];
+}
 var nodeConfig = {
   domain: "",
   username: "PeerNode_" + Math.floor(1e3 + Math.random() * 9e3),
@@ -1026,29 +1117,327 @@ function createApp() {
 </body>
 </html>`);
   });
-  const handleManifest = (req, res) => {
+  const handleCrawlerManifest = (req, res) => {
     const domain = getAppDomain(req);
     const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
     res.json({
-      protocol: "IMAGXP-P2P/1.0",
+      protocol: "CRAWLER-PING/2.1",
       domain,
       username: nodeConfig.username,
       avatarColor: nodeConfig.avatarColor,
       status: "online",
-      database: neonDb.isConfigured() ? "Neon PostgreSQL" : "Memory Cache",
+      database: neonDb.isConfigured() ? "Neon PostgreSQL Live" : "Persistent Local Cache",
       endpoints: {
-        manifest: `${protocol}://${domain}/.well-known/imagxp-agent.json`,
-        inbox: `${protocol}://${domain}/api/p2p/inbox`,
-        friendRequest: `${protocol}://${domain}/api/p2p/friend-request`,
-        resolve: `${protocol}://${domain}/api/p2p/manifest`,
-        sync: `${protocol}://${domain}/api/p2p/sync`,
+        ping: `${protocol}://${domain}/api/crawler/ping`,
+        webhook: `${protocol}://${domain}/api/crawler/ping`,
+        probe: `${protocol}://${domain}/api/crawler/probe`,
+        manifest: `${protocol}://${domain}/api/crawler/manifest`,
         dbStatus: `${protocol}://${domain}/api/db/status`
       },
+      crawlerTags: [
+        `#${deriveSubdomain(domain)}`,
+        "crawler-ping:active",
+        "webhook:hybrid-v2",
+        "federated-db"
+      ],
       timestamp: Date.now()
     });
   };
-  app2.get("/.well-known/imagxp-agent.json", handleManifest);
-  app2.get("/api/p2p/manifest", handleManifest);
+  app2.get("/api/crawler/manifest", handleCrawlerManifest);
+  app2.get("/.well-known/crawler-manifest.json", handleCrawlerManifest);
+  app2.get("/.well-known/imagxp-agent.json", handleCrawlerManifest);
+  app2.get("/api/p2p/manifest", handleCrawlerManifest);
+  app2.get("/api/crawler/probe", async (req, res) => {
+    try {
+      const target = cleanDomain(req.query.target || "");
+      if (!target) return res.status(400).json({ error: "Missing target parameter" });
+      const targetUser = await neonDb.getUser(target);
+      const now = Date.now();
+      const safeName = targetUser?.name || target.split("@")[0].split(".")[0];
+      const tags = [
+        { name: "crawler-protocol", value: "crawler-ping/2.1" },
+        { name: "crawler-node", value: target },
+        { name: "crawler-status", value: "online" },
+        { name: "crawler-tag", value: `#${safeName.toLowerCase().replace(/[^a-z0-9]/g, "")}` },
+        { name: "hybrid-webhook", value: "supported" },
+        { name: "database-persisted", value: "true" }
+      ];
+      res.json({
+        success: true,
+        target,
+        tags,
+        crawledAt: now,
+        nodeInfo: {
+          username: safeName,
+          domain: target,
+          status: "ready"
+        }
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+  app2.post(["/api/crawler/ping", "/api/crawler/webhook"], async (req, res) => {
+    try {
+      const {
+        action = "friend_request",
+        senderDomain,
+        senderUsername,
+        senderAvatarColor = "indigo",
+        senderTags = [],
+        targetIdentifier,
+        note,
+        message
+      } = req.body;
+      if (!senderDomain || !targetIdentifier) {
+        return res.status(400).json({ error: "Missing senderDomain or targetIdentifier" });
+      }
+      const cleanSender = cleanDomain(senderDomain);
+      const cleanTarget = cleanDomain(targetIdentifier);
+      const now = Date.now();
+      const targetUser = await neonDb.getUser(cleanTarget);
+      const targetDisplayName = targetUser?.name || cleanTarget.split("@")[0].split(".")[0];
+      const targetDomainOrEmail = targetUser?.email || cleanTarget;
+      const targetTags = [
+        { name: "crawler-protocol", value: "crawler-ping/2.1" },
+        { name: "crawler-node", value: cleanTarget },
+        { name: "crawler-tag", value: `#${targetDisplayName.toLowerCase().replace(/[^a-z0-9]/g, "")}` },
+        { name: "hybrid-webhook", value: "active" },
+        { name: "db-persisted", value: "true" }
+      ];
+      if (action === "friend_request") {
+        if (cleanSender === cleanTarget) {
+          return res.status(400).json({ error: "Cannot send friend request to yourself" });
+        }
+        await neonDb.deletePeer(cleanSender, targetDomainOrEmail);
+        const senderRecord = {
+          id: `${cleanSender}_${targetDomainOrEmail}`,
+          owner_domain: cleanSender,
+          peer_domain: targetDomainOrEmail,
+          username: targetDisplayName,
+          avatar_color: "purple",
+          inbox_url: `https://${targetDomainOrEmail}/api/crawler/ping`,
+          status: "pending",
+          direction: "outgoing",
+          added_at: now,
+          last_seen: now
+        };
+        await neonDb.upsertPeer(senderRecord);
+        const targetRecord = {
+          id: `${targetDomainOrEmail}_${cleanSender}`,
+          owner_domain: targetDomainOrEmail,
+          peer_domain: cleanSender,
+          username: senderUsername || cleanSender.split("@")[0].split(".")[0],
+          avatar_color: senderAvatarColor,
+          inbox_url: `https://${cleanSender}/api/crawler/ping`,
+          status: "pending",
+          direction: "incoming",
+          added_at: now,
+          last_seen: now
+        };
+        await neonDb.upsertPeer(targetRecord);
+        const computedSenderTags = senderTags && senderTags.length > 0 ? senderTags : getUserCrawlerTags(senderUsername || cleanSender, cleanSender);
+        broadcast("peer_request_received", {
+          domain: cleanSender,
+          ownerDomain: targetDomainOrEmail,
+          username: senderUsername || cleanSender,
+          avatarColor: senderAvatarColor,
+          inboxUrl: targetRecord.inbox_url,
+          status: "pending",
+          direction: "incoming",
+          note,
+          lastSeen: now,
+          addedAt: now,
+          crawlerTags: computedSenderTags
+        });
+        broadcast("peer_updated", {
+          domain: targetDomainOrEmail,
+          ownerDomain: cleanSender,
+          username: targetDisplayName,
+          avatarColor: "purple",
+          status: "pending",
+          direction: "outgoing",
+          lastSeen: now,
+          crawlerTags: targetTags.map((t) => t.value)
+        });
+        if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
+          (async () => {
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 3500);
+              await fetch(`https://${cleanTarget}/api/crawler/ping`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "friend_request",
+                  senderDomain: cleanSender,
+                  senderUsername: senderUsername || cleanSender,
+                  senderAvatarColor,
+                  senderTags: computedSenderTags,
+                  targetIdentifier: cleanTarget,
+                  note,
+                  timestamp: now
+                }),
+                signal: controller.signal
+              });
+              clearTimeout(timeout);
+            } catch (_) {
+            }
+          })();
+        }
+        return res.json({
+          success: true,
+          pong: true,
+          action: "friend_request",
+          crawledAt: now,
+          targetTags,
+          peer: senderRecord,
+          message: `Crawler Ping sent to ${targetDomainOrEmail} and saved to database.`
+        });
+      }
+      if (action === "friend_accept" || action === "friend_decline") {
+        const accept = action === "friend_accept";
+        const newStatus = accept ? "accepted" : "rejected";
+        if (accept) {
+          await neonDb.updatePeerStatus(cleanSender, cleanTarget, "accepted");
+          await neonDb.updatePeerStatus(cleanTarget, cleanSender, "accepted");
+          broadcast("peer_updated", {
+            domain: cleanTarget,
+            ownerDomain: cleanSender,
+            status: "accepted",
+            lastSeen: now
+          });
+          broadcast("peer_updated", {
+            domain: cleanSender,
+            ownerDomain: cleanTarget,
+            status: "accepted",
+            lastSeen: now
+          });
+        } else {
+          await neonDb.deletePeer(cleanSender, cleanTarget);
+          broadcast("peer_deleted", { domain: cleanTarget, ownerDomain: cleanSender });
+          broadcast("peer_deleted", { domain: cleanSender, ownerDomain: cleanTarget });
+        }
+        if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
+          (async () => {
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 3500);
+              await fetch(`https://${cleanTarget}/api/crawler/ping`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: accept ? "friend_accept" : "friend_decline",
+                  senderDomain: cleanSender,
+                  senderUsername,
+                  targetIdentifier: cleanTarget,
+                  timestamp: now
+                }),
+                signal: controller.signal
+              });
+              clearTimeout(timeout);
+            } catch (_) {
+            }
+          })();
+        }
+        return res.json({
+          success: true,
+          pong: true,
+          action,
+          status: newStatus,
+          crawledAt: now,
+          targetTags
+        });
+      }
+      if (action === "message") {
+        if (!message || !message.text && !message.imageUrl) {
+          return res.status(400).json({ error: "Missing message payload" });
+        }
+        const msgId = message.id || `msg_${now}_${Math.random().toString(36).slice(2, 6)}`;
+        const msgRecord = {
+          id: msgId,
+          target_id: cleanTarget,
+          target_type: "p2p",
+          sender_id: cleanSender,
+          sender_domain: cleanSender,
+          sender_name: senderUsername || cleanSender,
+          sender_color: senderAvatarColor,
+          text: (message.text || "").trim(),
+          image_url: message.imageUrl,
+          reply_to: message.replyTo,
+          timestamp: message.timestamp || now
+        };
+        await neonDb.insertMessage(msgRecord);
+        await neonDb.updatePeerStatus(cleanSender, cleanTarget, "accepted");
+        await neonDb.updatePeerStatus(cleanTarget, cleanSender, "accepted");
+        const chatMsg = {
+          id: msgRecord.id,
+          targetId: cleanTarget,
+          targetType: "p2p",
+          senderId: cleanSender,
+          senderDomain: cleanSender,
+          senderName: msgRecord.sender_name,
+          senderColor: msgRecord.sender_color,
+          text: msgRecord.text || "",
+          imageUrl: msgRecord.image_url,
+          replyTo: msgRecord.reply_to,
+          reactions: {},
+          timestamp: msgRecord.timestamp,
+          status: "delivered"
+        };
+        broadcast("message_new", chatMsg);
+        if (cleanTarget.includes(".") && !cleanTarget.includes("@")) {
+          (async () => {
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 3500);
+              await fetch(`https://${cleanTarget}/api/crawler/ping`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "message",
+                  senderDomain: cleanSender,
+                  senderUsername: msgRecord.sender_name,
+                  senderAvatarColor: msgRecord.sender_color,
+                  targetIdentifier: cleanTarget,
+                  message: {
+                    id: chatMsg.id,
+                    text: chatMsg.text,
+                    imageUrl: chatMsg.imageUrl,
+                    replyTo: chatMsg.replyTo,
+                    timestamp: chatMsg.timestamp
+                  },
+                  timestamp: now
+                }),
+                signal: controller.signal
+              });
+              clearTimeout(timeout);
+            } catch (_) {
+            }
+          })();
+        }
+        return res.json({
+          success: true,
+          pong: true,
+          action: "message",
+          messageId: chatMsg.id,
+          crawledAt: now,
+          targetTags,
+          status: "delivered"
+        });
+      }
+      return res.json({
+        success: true,
+        pong: true,
+        action: "probe",
+        crawledAt: now,
+        targetTags
+      });
+    } catch (err) {
+      console.error("api/crawler/ping error:", err);
+      res.status(500).json({ error: err.message || "Failed to process crawler ping" });
+    }
+  });
   app2.post("/api/peer/send-request", async (req, res) => {
     try {
       const {
@@ -1070,6 +1459,7 @@ function createApp() {
       const targetDisplayName = targetUser?.name || cleanTarget.split("@")[0].split(".")[0];
       const targetDomainOrEmail = targetUser?.email || cleanTarget;
       const now = Date.now();
+      await neonDb.deletePeer(cleanSender, targetDomainOrEmail);
       const senderRecord = {
         id: `${cleanSender}_${targetDomainOrEmail}`,
         owner_domain: cleanSender,
@@ -1158,20 +1548,26 @@ function createApp() {
       const cleanOwner = cleanDomain(ownerDomain);
       const cleanPeer = cleanDomain(peerDomain);
       const newStatus = accept ? "accepted" : "rejected";
-      await neonDb.updatePeerStatus(cleanOwner, cleanPeer, newStatus);
-      await neonDb.updatePeerStatus(cleanPeer, cleanOwner, newStatus);
-      broadcast("peer_updated", {
-        domain: cleanPeer,
-        ownerDomain: cleanOwner,
-        status: newStatus,
-        lastSeen: Date.now()
-      });
-      broadcast("peer_updated", {
-        domain: cleanOwner,
-        ownerDomain: cleanPeer,
-        status: newStatus,
-        lastSeen: Date.now()
-      });
+      if (accept) {
+        await neonDb.updatePeerStatus(cleanOwner, cleanPeer, "accepted");
+        await neonDb.updatePeerStatus(cleanPeer, cleanOwner, "accepted");
+        broadcast("peer_updated", {
+          domain: cleanPeer,
+          ownerDomain: cleanOwner,
+          status: "accepted",
+          lastSeen: Date.now()
+        });
+        broadcast("peer_updated", {
+          domain: cleanOwner,
+          ownerDomain: cleanPeer,
+          status: "accepted",
+          lastSeen: Date.now()
+        });
+      } else {
+        await neonDb.deletePeer(cleanOwner, cleanPeer);
+        broadcast("peer_deleted", { domain: cleanPeer, ownerDomain: cleanOwner });
+        broadcast("peer_deleted", { domain: cleanOwner, ownerDomain: cleanPeer });
+      }
       if (cleanPeer.includes(".") && !cleanPeer.includes("@")) {
         (async () => {
           try {
@@ -1384,17 +1780,19 @@ function createApp() {
         domain: p.peer_domain,
         username: p.username,
         avatarColor: p.avatar_color,
-        inboxUrl: p.inbox_url || `https://${p.peer_domain}/api/p2p/inbox`,
+        inboxUrl: p.inbox_url || `https://${p.peer_domain}/api/crawler/ping`,
         status: p.status,
         direction: p.direction,
         addedAt: p.added_at,
-        lastSeen: p.last_seen
+        lastSeen: p.last_seen,
+        crawlerTags: getUserCrawlerTags(p.username, p.peer_domain)
       }));
       res.json({
         myDomain: cleanUser,
         myUsername: nodeConfig.username,
         myAvatarColor: nodeConfig.avatarColor,
         customStatus: nodeConfig.customStatus,
+        crawlerTags: getUserCrawlerTags(nodeConfig.username, cleanUser),
         channels: formattedChannels.length > 0 ? formattedChannels : [{ id: "general", name: "general", createdAt: Date.now(), isDefault: true }],
         messages: formattedMessages,
         peers: formattedPeers,
@@ -1620,8 +2018,8 @@ function createApp() {
     const clean = cleanDomain(req.params.domain);
     const ownerDomain = cleanDomain(req.query.ownerDomain || getAppDomain(req));
     await neonDb.deletePeer(ownerDomain, clean);
-    await neonDb.clearMessages(clean);
     broadcast("peer_deleted", { domain: clean, ownerDomain });
+    broadcast("peer_deleted", { domain: ownerDomain, ownerDomain: clean });
     res.json({ success: true, domain: clean });
   });
   app2.post("/api/chat/clear", async (req, res) => {

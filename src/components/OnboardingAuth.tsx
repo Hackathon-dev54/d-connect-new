@@ -140,11 +140,11 @@ export const OnboardingAuth: React.FC<OnboardingAuthProps> = ({
             <div className="flex items-center justify-center space-x-2">
               <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">D-Connect</h1>
               <span className="rounded-md border border-indigo-700/50 bg-indigo-950/80 px-2 py-0.5 text-[11px] font-mono font-bold text-indigo-400">
-                P2P & Neon
+                Crawler Ping & Neon
               </span>
             </div>
             <p className="mt-1.5 text-xs text-[#8e8e93] sm:text-sm">
-              Decentralized Peer-to-Peer Messenger with Neon DB Sync
+              Web Crawler Ping & Hybrid Webhook Messenger with Database Storage
             </p>
           </div>
         </div>
@@ -337,8 +337,8 @@ export const OnboardingAuth: React.FC<OnboardingAuthProps> = ({
           </div>
           <div className="p-2 rounded-xl bg-[#0c0c0e] border border-[#1a1a1a]">
             <Globe className="h-4 w-4 mx-auto text-cyan-400 mb-1" />
-            <p className="font-semibold text-white">WebRTC P2P</p>
-            <p className="text-[9px] text-[#636366]">Browser-to-browser</p>
+            <p className="font-semibold text-white">Crawler Ping</p>
+            <p className="text-[9px] text-[#636366]">Hybrid webhook sync</p>
           </div>
         </div>
       </div>
